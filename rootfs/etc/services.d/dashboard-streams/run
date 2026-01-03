@@ -1,0 +1,32 @@
+#!/usr/bin/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Start Dashboard Streams service
+# ==============================================================================
+
+declare ingress_port
+
+bashio::log.info "Starting Dashboard Streams..."
+
+# Activate virtual environment
+source /opt/venv/bin/activate
+
+# Get the ingress port if available
+if bashio::config.exists 'ingress_port'; then
+    ingress_port=$(bashio::addon.ingress_port)
+    bashio::log.info "Ingress port: ${ingress_port}"
+fi
+
+# Notify s6 we're ready once server starts (using fd 3)
+exec 3>&1
+(
+    # Wait for server to be ready
+    while ! nc -z localhost 8099 2>/dev/null; do
+        sleep 0.5
+    done
+    bashio::log.info "Server ready, notifying s6"
+    echo "ready" >&3
+) &
+
+# Run the server
+exec python3 /usr/src/app/server.py

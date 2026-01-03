@@ -1,0 +1,37 @@
+name: "Dashboard Streams"
+description: "Stream Lovelace dashboards to Roku, Apple TV, Chromecast and other devices via HLS"
+version: "0.1.0"
+slug: "dashboard-streams"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+  - armhf
+  - i386
+init: false
+homeassistant_api: true
+ingress: true
+ingress_port: 8099
+ingress_stream: true
+panel_icon: "mdi:cast"
+panel_title: "Dashboard Streams"
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "HLS streaming endpoint"
+options:
+  dashboard_url: "/lovelace/0"
+  access_token: ""
+  kiosk_mode: true
+  dark_mode: true
+schema:
+  dashboard_url: str
+  access_token: password
+  kiosk_mode: bool
+  dark_mode: bool
+  width: int(640,3840)?
+  height: int(480,2160)?
+  quality: int(18,35)?
+  fps: int(1,30)?
+  segment_duration: int(1,10)?
+url: "https://github.com/xaviergmail/hass-dashboard-stream"

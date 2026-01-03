@@ -1,0 +1,7 @@
+#!/usr/bin/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Finish script for Dashboard Streams
+# ==============================================================================
+
+bashio::log.info "Dashboard Streams stopped"

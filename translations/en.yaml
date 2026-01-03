@@ -1,0 +1,41 @@
+configuration:
+  access_token:
+    name: Access Token
+    description: >-
+      Required. Long-lived access token for Home Assistant authentication.
+      Create one in your HA profile under "Long-Lived Access Tokens".
+  dashboard_url:
+    name: Dashboard URL
+    description: >-
+      Required. Path to the Lovelace dashboard to stream (e.g., /lovelace/0).
+  kiosk_mode:
+    name: Kiosk Mode
+    description: >-
+      Hides the sidebar and header. Requires kiosk-mode from HACS: https://github.com/NemesisRE/kiosk-mode
+  dark_mode:
+    name: Dark Mode
+    description: >-
+      Forces dark mode for the dashboard stream.
+  width:
+    name: Width
+    description: >-
+      Optional. Stream width in pixels. Default: 1920
+  height:
+    name: Height
+    description: >-
+      Optional. Stream height in pixels. Default: 1080
+  quality:
+    name: Quality (CRF)
+    description: >-
+      Optional. H.264 quality (18=best, 28=smallest). Default: 23
+  fps:
+    name: Frames Per Second
+    description: >-
+      Optional. Lower values use less CPU. Default: 5
+  segment_duration:
+    name: Segment Duration
+    description: >-
+      Optional. HLS segment length in seconds. Default: 4
+
+network:
+  8099/tcp: HLS streaming endpoint
