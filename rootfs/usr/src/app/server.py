@@ -636,11 +636,37 @@ class StreamServer:
         self.capture = capture
         self.encoder = encoder
         self.config = config
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[self._cors_middleware])
         self._setup_routes()
+
+    @web.middleware
+    async def _cors_middleware(self, request: web.Request, handler):
+        """Add CORS headers to all responses."""
+        # Handle preflight OPTIONS requests
+        if request.method == "OPTIONS":
+            return web.Response(
+                status=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Range",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
+
+        # Process the request and add CORS headers to response
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Expose-Headers"] = (
+            "Content-Length, Content-Range"
+        )
+        return response
 
     def _setup_routes(self):
         """Set up HTTP routes."""
+        # Add OPTIONS handler for all routes
+        self.app.router.add_route("OPTIONS", "/{path:.*}", self._handle_options)
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/stream.m3u8", self.handle_playlist)
         self.app.router.add_get("/segment_{name}.ts", self.handle_segment)
@@ -653,6 +679,10 @@ class StreamServer:
         self.app.router.add_get("/hls/loading.ts", self.handle_loading_segment)
         self.app.router.add_get("/hls/{name}.ts", self.handle_hls_segment)
         self.app.router.add_get("/loading.ts", self.handle_loading_segment)
+
+    async def _handle_options(self, request: web.Request) -> web.Response:
+        """Handle OPTIONS preflight requests."""
+        return web.Response(status=204)
 
     async def handle_index(self, request: web.Request) -> web.Response:
         """Serve the index page with stream info."""
