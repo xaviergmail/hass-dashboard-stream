@@ -1176,10 +1176,13 @@ async def main():
         playlist_path = Path("/tmp/hls/stream.m3u8")
         while not playlist_path.exists():
             await asyncio.sleep(0.5)
-        # Notify s6 via fd 3
+        # Notify s6 via fd 3 (only if running under s6)
         try:
-            with os.fdopen(3, "w") as f:
-                f.write("\n")
+            # Check if fd 3 exists before trying to use it
+            import stat
+
+            os.fstat(3)
+            os.write(3, b"\n")
             logger.info("Notified s6 that service is ready")
         except OSError:
             # fd 3 not available (not running under s6)
