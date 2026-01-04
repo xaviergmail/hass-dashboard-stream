@@ -893,23 +893,28 @@ class StreamServer:
     async def handle_playlist(self, request: web.Request) -> web.Response:
         """Serve the HLS playlist file."""
         playlist_path = HLS_DIR / "stream.m3u8"
+        segment_duration = self.config.get("segment_duration", 4)
 
-        if not playlist_path.exists():
-            # Return a valid HLS playlist with multiple segments for player compatibility
-            # Players typically need 3+ segments to start playback
-            content = """#EXTM3U
+        # Check if real stream has enough segments (at least 2)
+        real_segments = list(HLS_DIR.glob("segment_*.ts"))
+        stream_ready = playlist_path.exists() and len(real_segments) >= 2
+
+        if not stream_ready:
+            # Return loading playlist that increments sequence to simulate live stream
+            # Use current time to create incrementing sequence numbers
+            import time
+
+            seq = int(time.time()) % 10000
+
+            content = f"""#EXTM3U
 #EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:4
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:4.0,
+#EXT-X-TARGETDURATION:{segment_duration}
+#EXT-X-MEDIA-SEQUENCE:{seq}
+#EXTINF:{segment_duration}.0,
 loading.ts
-#EXTINF:4.0,
+#EXTINF:{segment_duration}.0,
 loading.ts
-#EXTINF:4.0,
-loading.ts
-#EXTINF:4.0,
-loading.ts
-#EXTINF:4.0,
+#EXTINF:{segment_duration}.0,
 loading.ts
 """
         else:
