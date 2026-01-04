@@ -13,7 +13,8 @@ RUN apk add --no-cache \
     harfbuzz \
     ttf-freefont \
     font-noto-emoji \
-    ffmpeg
+    ffmpeg \
+    netcat-openbsd
 
 # Set up Python virtual environment
 RUN python3 -m venv /opt/venv
