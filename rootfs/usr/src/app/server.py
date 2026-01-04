@@ -531,21 +531,22 @@ class HLSEncoder:
             "lavfi",
             "-i",
             "anullsrc=r=44100:cl=stereo",
+            # Convert to yuv420p (PNG is RGB/RGBA which x264 baseline/main can't handle)
+            "-vf",
+            "format=yuv420p",
             # Video encoding - Roku compatible settings
             "-c:v",
             "libx264",
             "-profile:v",
-            "baseline",  # Most compatible profile
+            "main",
             "-level",
-            "3.1",
+            "4.0",
             "-preset",
             "ultrafast",
             "-tune",
             "zerolatency",
             "-crf",
             str(quality),
-            "-pix_fmt",
-            "yuv420p",
             "-r",
             str(fps),
             "-g",
@@ -596,18 +597,28 @@ class HLSEncoder:
 
     def write_frame(self, png_data: bytes):
         """Write a PNG frame to FFmpeg."""
-        if self.process and self.process.stdin:
-            try:
-                self.process.stdin.write(png_data)
-                self.process.stdin.flush()
-            except BrokenPipeError:
-                # Log FFmpeg error before restarting
-                if self.process and self.process.stderr:
-                    stderr = self.process.stderr.read()
-                    if stderr:
-                        logger.error(f"FFmpeg error: {stderr.decode()}")
-                logger.error("FFmpeg pipe broken, restarting encoder")
-                self.restart()
+        if not self.process or not self.process.stdin:
+            logger.warning("FFmpeg process not ready, skipping frame")
+            return
+
+        if not png_data:
+            logger.warning("Empty frame data, skipping")
+            return
+
+        try:
+            self.process.stdin.write(png_data)
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            # Log FFmpeg error before restarting
+            if self.process and self.process.stderr:
+                stderr = self.process.stderr.read()
+                if stderr:
+                    logger.error(f"FFmpeg error: {stderr.decode()}")
+            logger.error("FFmpeg pipe broken, restarting encoder")
+            self.restart()
+        except Exception as e:
+            logger.error(f"Error writing frame: {e}")
+            self.restart()
 
     def restart(self):
         """Restart the encoder."""
