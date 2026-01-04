@@ -650,7 +650,9 @@ class StreamServer:
         self.app.router.add_post("/api/refresh", self.handle_refresh)
         # Serve HLS files with proper cache headers (no static serving to avoid 304s)
         self.app.router.add_get("/hls/stream.m3u8", self.handle_playlist)
+        self.app.router.add_get("/hls/loading.ts", self.handle_loading_segment)
         self.app.router.add_get("/hls/{name}.ts", self.handle_hls_segment)
+        self.app.router.add_get("/loading.ts", self.handle_loading_segment)
 
     async def handle_index(self, request: web.Request) -> web.Response:
         """Serve the index page with stream info."""
@@ -843,12 +845,22 @@ class StreamServer:
     async def handle_playlist(self, request: web.Request) -> web.Response:
         """Serve the HLS playlist file."""
         playlist_path = HLS_DIR / "stream.m3u8"
-        if not playlist_path.exists():
-            return web.Response(status=503, text="Stream not ready yet")
 
-        # Read file content directly to avoid FileResponse's ETag/Last-Modified
-        # which cause 304 responses on live streams
-        content = playlist_path.read_text()
+        if not playlist_path.exists():
+            # Return a valid HLS playlist pointing to a loading segment
+            # This keeps players connected while waiting for the real stream
+            content = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:4
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:4.0,
+loading.ts
+"""
+        else:
+            # Read file content directly to avoid FileResponse's ETag/Last-Modified
+            # which cause 304 responses on live streams
+            content = playlist_path.read_text()
+
         return web.Response(
             text=content,
             content_type="application/vnd.apple.mpegurl",
@@ -887,6 +899,91 @@ class StreamServer:
                 "Access-Control-Allow-Origin": "*",
             },
         )
+
+    async def handle_loading_segment(self, request: web.Request) -> web.Response:
+        """Serve a placeholder loading segment while stream initializes."""
+        # Generate loading segment on first request, then cache it
+        if not hasattr(self, "_loading_segment"):
+            self._loading_segment = await self._generate_loading_segment()
+
+        return web.Response(
+            body=self._loading_segment,
+            content_type="video/mp2t",
+            headers={
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    async def _generate_loading_segment(self) -> bytes:
+        """Generate a 4-second black video segment with 'Loading...' text."""
+        import tempfile
+
+        width = self.config.get("width", 1920)
+        height = self.config.get("height", 1080)
+        fps = self.config.get("fps", 2)
+
+        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
+            output_path = f.name
+
+        try:
+            # Generate black video with "Loading..." text and silent audio
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={width}x{height}:d=4:r={fps}",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-vf",
+                f"drawtext=text='Loading...':fontsize={height // 15}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-level",
+                "4.0",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "32k",
+                "-t",
+                "4",
+                "-f",
+                "mpegts",
+                output_path,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                logger.error(f"Failed to generate loading segment: {stderr.decode()}")
+                # Return empty bytes if generation fails
+                return b""
+
+            with open(output_path, "rb") as f:
+                return f.read()
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(output_path)
+            except:
+                pass
 
     async def handle_snapshot(self, request: web.Request) -> web.Response:
         """Handle single snapshot requests."""
