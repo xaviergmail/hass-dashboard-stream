@@ -1004,7 +1004,7 @@ loading.ts
                 "-f",
                 "lavfi",
                 "-i",
-                f"color=c=black:s={width}x{height}:d=4:r={fps}",
+                f"color=c=0x1a1a2e:s={width}x{height}:d=4:r={fps}",
                 "-f",
                 "lavfi",
                 "-i",
