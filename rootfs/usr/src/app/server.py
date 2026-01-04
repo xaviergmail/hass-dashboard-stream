@@ -895,12 +895,20 @@ class StreamServer:
         playlist_path = HLS_DIR / "stream.m3u8"
 
         if not playlist_path.exists():
-            # Return a valid HLS playlist pointing to a loading segment
-            # This keeps players connected while waiting for the real stream
+            # Return a valid HLS playlist with multiple segments for player compatibility
+            # Players typically need 3+ segments to start playback
             content = """#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:4
 #EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:4.0,
+loading.ts
+#EXTINF:4.0,
+loading.ts
+#EXTINF:4.0,
+loading.ts
+#EXTINF:4.0,
+loading.ts
 #EXTINF:4.0,
 loading.ts
 """
