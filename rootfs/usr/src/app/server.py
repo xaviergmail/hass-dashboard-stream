@@ -92,13 +92,22 @@ class DashboardCapture:
         loop = asyncio.get_event_loop()
         self.driver = await loop.run_in_executor(None, self._create_driver)
 
-        # Set exact viewport size (window-size flag doesn't always work in headless)
+        # Set exact viewport size using CDP (set_window_size sets outer size, not viewport)
         width = self.config.get("width", 1920)
         height = self.config.get("height", 1080)
         await loop.run_in_executor(
-            None, lambda: self.driver.set_window_size(width, height)
+            None,
+            lambda: self.driver.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            ),
         )
-        logger.info(f"Set viewport size to {width}x{height}")
+        logger.info(f"Set viewport size to {width}x{height} via CDP")
 
         # Force dark mode via CDP if enabled
         if self.config.get("dark_mode", True):
