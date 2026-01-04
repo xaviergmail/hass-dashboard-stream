@@ -535,9 +535,9 @@ class HLSEncoder:
             "-c:v",
             "libx264",
             "-profile:v",
-            "main",  # Roku requires baseline or main profile
+            "baseline",  # Most compatible profile
             "-level",
-            "4.0",
+            "3.1",
             "-preset",
             "ultrafast",
             "-tune",
@@ -557,7 +557,6 @@ class HLSEncoder:
             "aac",
             "-b:a",
             "32k",
-            "-shortest",  # End when video ends
             # HLS output settings
             "-f",
             "hls",
@@ -946,7 +945,7 @@ loading.ts
         )
 
     async def _generate_loading_segment(self) -> bytes:
-        """Generate a 4-second black video segment with 'Loading...' text."""
+        """Generate a 4-second black video segment (placeholder while stream loads)."""
         import tempfile
 
         width = self.config.get("width", 1920)
@@ -957,7 +956,7 @@ loading.ts
             output_path = f.name
 
         try:
-            # Generate black video with "Loading..." text and silent audio
+            # Generate simple black video with silent audio (no text to avoid font issues)
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -969,8 +968,6 @@ loading.ts
                 "lavfi",
                 "-i",
                 "anullsrc=r=44100:cl=stereo",
-                "-vf",
-                f"drawtext=text='Loading...':fontsize={height // 15}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2",
                 "-c:v",
                 "libx264",
                 "-profile:v",
@@ -979,8 +976,6 @@ loading.ts
                 "4.0",
                 "-preset",
                 "ultrafast",
-                "-tune",
-                "zerolatency",
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
@@ -1003,13 +998,11 @@ loading.ts
 
             if proc.returncode != 0:
                 logger.error(f"Failed to generate loading segment: {stderr.decode()}")
-                # Return empty bytes if generation fails
                 return b""
 
             with open(output_path, "rb") as f:
                 return f.read()
         finally:
-            # Clean up temp file
             try:
                 os.unlink(output_path)
             except:
