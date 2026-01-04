@@ -1,6 +1,6 @@
 name: "Dashboard Streams"
 description: "Stream Lovelace dashboards to Roku, Apple TV, Chromecast and other devices via HLS"
-version: "0.1.2"
+version: "0.2.2"
 slug: "dashboard-streams"
 arch:
   - amd64
@@ -10,6 +10,7 @@ arch:
   - i386
 init: false
 homeassistant_api: true
+hassio_api: true
 ingress: true
 ingress_port: 8099
 ingress_stream: true

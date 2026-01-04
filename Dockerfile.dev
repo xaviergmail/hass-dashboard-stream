@@ -1,0 +1,35 @@
+# Development Dockerfile - run locally without Home Assistant
+FROM python:3.11-alpine
+
+# Install dependencies
+RUN apk add --no-cache \
+    chromium \
+    chromium-chromedriver \
+    nss \
+    freetype \
+    harfbuzz \
+    ttf-freefont \
+    font-noto-emoji \
+    ffmpeg
+
+# Set up Python virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements and install Python packages
+COPY rootfs/usr/src/app/requirements.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Create HLS output directory
+RUN mkdir -p /tmp/hls /data
+
+# Copy application files
+COPY rootfs/usr/src/app /usr/src/app
+
+WORKDIR /usr/src/app
+
+# Expose the streaming port
+EXPOSE 8099
+
+# Run the server directly (no s6)
+CMD ["python3", "server.py"]
