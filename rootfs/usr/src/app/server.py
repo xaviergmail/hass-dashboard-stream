@@ -531,9 +531,9 @@ class HLSEncoder:
             "lavfi",
             "-i",
             "anullsrc=r=44100:cl=stereo",
-            # Convert to yuv420p (PNG is RGB/RGBA which x264 baseline/main can't handle)
+            # Ensure even dimensions and convert to yuv420p (x264 requires both)
             "-vf",
-            "format=yuv420p",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
             # Video encoding - Roku compatible settings
             "-c:v",
             "libx264",
