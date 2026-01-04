@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-01-04
+
+### Added
+- Supervisor API integration for reliable Home Assistant connectivity
+- s6 readiness notification when HLS stream becomes available
+- SSL certificate error handling for self-signed certificates
+- Refresh dashboard button in web UI to manually reload the captured page
+- Frame deduplication - skip encoding when dashboard content unchanged
+
+### Fixed
+- Authentication now uses HA's configured internal/external URL instead of internal IP
+- Improved token injection with multiple URL format support
+- Fixed auth URL mismatch between `https://host:443` and `https://host`
+- Parse HA's expected `hassUrl` from OAuth state for correct token storage
+- Removed duplicate kiosk-mode detection code causing NameError
+
+### Changed
+- Fetch HA URL from Supervisor API (`/core/api/config`) for proper external URL support
+- Added `hassio_api: true` permission for Supervisor API access
+
+### Optimized
+- Reduced default FPS from 5 to 2 (dashboards don't need high frame rates)
+- Increased default CRF from 23 to 28 (lower CPU encoding overhead)
+- Increased default segment duration from 2s to 4s (less HLS overhead)
+- Added 15+ Chromium flags to reduce CPU/memory usage
+- Reduced logging frequency from every second to every 30 seconds
+
 ## [0.1.2] - 2025-01-03
 
 ### Fixed
