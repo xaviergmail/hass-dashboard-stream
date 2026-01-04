@@ -648,8 +648,9 @@ class StreamServer:
         self.app.router.add_get("/health", self.handle_health)
         self.app.router.add_get("/api/kiosk-status", self.handle_kiosk_status)
         self.app.router.add_post("/api/refresh", self.handle_refresh)
-        # Serve HLS files directly
-        self.app.router.add_static("/hls/", HLS_DIR, show_index=False)
+        # Serve HLS files with proper cache headers (no static serving to avoid 304s)
+        self.app.router.add_get("/hls/stream.m3u8", self.handle_playlist)
+        self.app.router.add_get("/hls/{name}.ts", self.handle_hls_segment)
 
     async def handle_index(self, request: web.Request) -> web.Response:
         """Serve the index page with stream info."""
@@ -845,27 +846,43 @@ class StreamServer:
         if not playlist_path.exists():
             return web.Response(status=503, text="Stream not ready yet")
 
-        return web.FileResponse(
-            playlist_path,
+        # Read file content directly to avoid FileResponse's ETag/Last-Modified
+        # which cause 304 responses on live streams
+        content = playlist_path.read_text()
+        return web.Response(
+            text=content,
+            content_type="application/vnd.apple.mpegurl",
             headers={
-                "Content-Type": "application/vnd.apple.mpegurl",
                 "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
                 "Access-Control-Allow-Origin": "*",
             },
         )
 
     async def handle_segment(self, request: web.Request) -> web.Response:
-        """Serve HLS segment files."""
+        """Serve HLS segment files (legacy route)."""
         name = request.match_info["name"]
-        segment_path = HLS_DIR / f"segment_{name}.ts"
+        return await self._serve_segment(f"segment_{name}.ts")
+
+    async def handle_hls_segment(self, request: web.Request) -> web.Response:
+        """Serve HLS segment files from /hls/ path."""
+        name = request.match_info["name"]
+        return await self._serve_segment(f"{name}.ts")
+
+    async def _serve_segment(self, filename: str) -> web.Response:
+        """Serve a segment file with proper headers."""
+        segment_path = HLS_DIR / filename
 
         if not segment_path.exists():
             return web.Response(status=404, text="Segment not found")
 
-        return web.FileResponse(
-            segment_path,
+        # Read content directly to avoid ETag/Last-Modified from FileResponse
+        content = segment_path.read_bytes()
+        return web.Response(
+            body=content,
+            content_type="video/mp2t",
             headers={
-                "Content-Type": "video/mp2t",
                 "Cache-Control": "max-age=3600",
                 "Access-Control-Allow-Origin": "*",
             },
