@@ -11,3 +11,6 @@ build/
 .eggs/
 *.log
 .DS_Store
+
+# Dev files (may contain secrets)
+dev-config.json

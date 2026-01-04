@@ -1,0 +1,24 @@
+services:
+  dashboard-streams:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8099:8099"
+    volumes:
+      # Config file only - source is synced via watch mode
+      - ./dev-config.json:/data/options.json:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    shm_size: "256mb"
+    develop:
+      watch:
+        # Rebuild on Dockerfile or requirements changes
+        - action: rebuild
+          path: Dockerfile.dev
+        - action: rebuild
+          path: rootfs/usr/src/app/requirements.txt
+        # Sync and restart on Python code changes
+        - action: sync+restart
+          path: rootfs/usr/src/app
+          target: /usr/src/app
