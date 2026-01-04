@@ -101,8 +101,9 @@ class DashboardCapture:
             full_url = dashboard_url
             base_url = "/".join(full_url.split("/")[:3])
         elif dashboard_url.startswith("/"):
-            # Relative path - use direct HA connection
-            base_url = "http://homeassistant.local.hass.io:8123"
+            # Relative path - use internal HA connection
+            # 'homeassistant' is the internal hostname for HA core in the Docker network
+            base_url = "http://homeassistant:8123"
             full_url = f"{base_url}{dashboard_url}"
         else:
             full_url = dashboard_url

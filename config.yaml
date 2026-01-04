@@ -1,6 +1,6 @@
 name: "Dashboard Streams"
 description: "Stream Lovelace dashboards to Roku, Apple TV, Chromecast and other devices via HLS"
-version: "0.1.1"
+version: "0.1.2"
 slug: "dashboard-streams"
 arch:
   - amd64
