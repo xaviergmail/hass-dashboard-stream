@@ -42,7 +42,7 @@ class DashboardCapture:
     def _create_driver(self) -> webdriver.Chrome:
         """Create a headless Chrome driver optimized for Pi."""
         options = Options()
-        options.add_argument("--headless")
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
@@ -91,6 +91,14 @@ class DashboardCapture:
         """Start the browser and navigate to the dashboard."""
         loop = asyncio.get_event_loop()
         self.driver = await loop.run_in_executor(None, self._create_driver)
+
+        # Set exact viewport size (window-size flag doesn't always work in headless)
+        width = self.config.get("width", 1920)
+        height = self.config.get("height", 1080)
+        await loop.run_in_executor(
+            None, lambda: self.driver.set_window_size(width, height)
+        )
+        logger.info(f"Set viewport size to {width}x{height}")
 
         # Force dark mode via CDP if enabled
         if self.config.get("dark_mode", True):
