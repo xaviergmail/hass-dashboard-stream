@@ -564,9 +564,9 @@ class HLSEncoder:
             "-hls_time",
             str(segment_time),
             "-hls_list_size",
-            "6",  # More segments for Roku stability
+            "5",
             "-hls_flags",
-            "delete_segments+discont_start+omit_endlist",
+            "delete_segments+append_list",
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",
@@ -1074,7 +1074,6 @@ async def capture_loop(capture: DashboardCapture, encoder: HLSEncoder, config: d
     fps = config.get("fps", 2)
     frame_interval = 1.0 / fps
     frame_count = 0
-    skipped_frames = 0
     last_log_time = 0
 
     logger.info(f"Starting capture loop at {fps} fps ({frame_interval:.3f}s interval)")
@@ -1084,20 +1083,15 @@ async def capture_loop(capture: DashboardCapture, encoder: HLSEncoder, config: d
             start_time = asyncio.get_event_loop().time()
 
             # Capture frame
-            png_data, is_new = await capture.capture_frame()
+            png_data, _ = await capture.capture_frame()
             frame_count += 1
 
-            # Only encode if frame changed (saves significant CPU)
-            if is_new:
-                encoder.write_frame(png_data)
-            else:
-                skipped_frames += 1
+            # Always send frames to encoder - HLS needs consistent frame rate
+            encoder.write_frame(png_data)
 
             # Log every 30 seconds to reduce log spam
             if start_time - last_log_time >= 30:
-                logger.info(
-                    f"Frames: {frame_count} captured, {skipped_frames} skipped (unchanged)"
-                )
+                logger.info(f"Frames captured: {frame_count}")
                 last_log_time = start_time
 
             # Wait for next frame, accounting for capture time
