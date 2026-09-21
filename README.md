@@ -8,7 +8,7 @@ Stream your Home Assistant Lovelace dashboards to Roku, Apple TV, Chromecast, Fi
 ## Features
 
 - **HLS Streaming**: Industry-standard HTTP Live Streaming compatible with all major devices
-- **Low Latency**: Optimized for ~3-5 second delay with automatic dashboard refresh
+- **Low Latency**: Cached snapshots avoid stale-frame backlogs; HLS remains available for generic players
 - **Dark Mode**: Forces dark theme for better TV viewing (configurable)
 - **Kiosk Mode**: Hides sidebar and header for a clean display
 - **Auto-Refresh**: Automatically updates when dashboard configuration changes
@@ -48,6 +48,7 @@ GitHub: https://github.com/NemesisRE/kiosk-mode
 | Option | Description |
 |--------|-------------|
 | `dashboard_url` | Path to the Lovelace dashboard (e.g., `/lovelace/0`) |
+| `home_assistant_url` | Explicit HA origin used for relative dashboard paths (default: `http://homeassistant:8123`) |
 | `access_token` | Long-lived access token for authentication |
 | `kiosk_mode` | Hide sidebar and header (requires kiosk-mode from HACS) |
 | `dark_mode` | Force dark theme for the stream |
@@ -58,9 +59,9 @@ GitHub: https://github.com/NemesisRE/kiosk-mode
 |--------|---------|-------------|
 | `width` | `1920` | Stream width in pixels |
 | `height` | `1080` | Stream height in pixels |
-| `quality` | `23` | H.264 CRF quality (18=best, 28=smallest) |
-| `fps` | `5` | Frames per second |
-| `segment_duration` | `2` | HLS segment duration in seconds |
+| `quality` | `28` | H.264 CRF quality (18=best, 28=smallest) |
+| `fps` | `2` | Frames per second |
+| `segment_duration` | `4` | HLS segment duration in seconds |
 
 ### Creating an Access Token
 
@@ -92,7 +93,19 @@ Default port: `8099`
 ## Device Setup
 
 ### Roku
-Install "Roku Media Player" or any HLS-compatible channel and add the stream URL.
+For generic Roku HLS players, use:
+`http://<your-ha-ip>:8099/hls/stream.m3u8`
+
+For the lowest-latency Roku display, use the bundled snapshot channel in `roku/`:
+
+1. If the add-on is not at `homeassistant`, edit `roku/source/MainScene.brs` and change `m.snapshotUrl`.
+2. Package it from the repository root:
+   ```sh
+   (cd roku && zip -r ../dashboard-streams-roku.zip manifest source)
+   ```
+3. Enable Roku Developer Mode, upload `dashboard-streams-roku.zip`, and launch the channel.
+
+The channel requests the cached `/snapshot.jpg` once per second with a cache-busting query parameter. It does not open a Selenium request or buffer HLS segments per Roku playback process.
 
 ### Apple TV
 Use any media player app that supports HLS streams.
@@ -153,8 +166,10 @@ automation:
 
 ### Stream not loading
 - Check the health endpoint: `http://<your-ha-ip>:8099/health`
-- Wait 10-15 seconds after starting for the first segments to generate
+- `status` stays `starting` until both the HLS playlist and first cached snapshot exist
 - Ensure port 8099 is accessible from your device
+
+The health response includes `capture_ready`, `stream_ready`, `snapshot_ready`, and `last_frame_age_ms` so capture and encoding failures can be distinguished.
 
 ### High CPU usage
 - Reduce `fps` to 3 or lower

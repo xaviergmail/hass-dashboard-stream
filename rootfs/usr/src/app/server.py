@@ -18,6 +18,13 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from PIL import Image
 
+from stream_core import (
+    LatestFrameStore,
+    put_latest,
+    resolve_dashboard_url,
+    retry_delay_seconds,
+)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -53,7 +60,6 @@ class DashboardCapture:
         options.add_argument("--disable-translate")
         options.add_argument("--disable-default-apps")
         options.add_argument("--no-first-run")
-        options.add_argument("--single-process")  # Reduce memory on Pi
         options.add_argument(
             f"--window-size={self.config.get('width', 1920)},{self.config.get('height', 1080)}"
         )
@@ -109,6 +115,10 @@ class DashboardCapture:
     async def _get_ha_url(self) -> str:
         """Get the Home Assistant URL from Supervisor API."""
         import aiohttp
+
+        configured_url = self.config.get("home_assistant_url") or ""
+        if configured_url:
+            return configured_url.rstrip("/")
 
         supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
         if not supervisor_token:
@@ -172,26 +182,14 @@ class DashboardCapture:
         dashboard_url = self.config["dashboard_url"]
         kiosk_mode = self.config.get("kiosk_mode", True)
 
-        # Append ?kiosk if kiosk_mode is enabled and not already present
-        if kiosk_mode and "kiosk" not in dashboard_url:
-            if "?" in dashboard_url:
-                dashboard_url = f"{dashboard_url}&kiosk"
-            else:
-                dashboard_url = f"{dashboard_url}?kiosk"
-            logger.info(f"Kiosk mode enabled, URL: {dashboard_url}")
-
-        # Determine the base URL and full URL
-        if dashboard_url.startswith("http://") or dashboard_url.startswith("https://"):
-            # External URL (for testing or external dashboards)
-            full_url = dashboard_url
-            base_url = "/".join(full_url.split("/")[:3])
-        elif dashboard_url.startswith("/"):
-            # Relative path - get HA URL from Supervisor
-            base_url = await self._get_ha_url()
-            full_url = f"{base_url}{dashboard_url}"
-        else:
-            full_url = dashboard_url
-            base_url = None
+        home_assistant_url = (
+            await self._get_ha_url() if dashboard_url.startswith("/") else ""
+        )
+        full_url, base_url = resolve_dashboard_url(
+            dashboard_url, home_assistant_url, kiosk_mode
+        )
+        if kiosk_mode:
+            logger.info(f"Kiosk mode URL: {full_url}")
 
         # Use the long-lived access token we created
         token = self.access_token
@@ -587,8 +585,12 @@ class HLSEncoder:
         # Start a thread to log FFmpeg stderr
         import threading
 
+        process = self.process
+
         def log_ffmpeg_stderr():
-            for line in self.process.stderr:
+            if process is None or process.stderr is None:
+                return
+            for line in process.stderr:
                 logger.info(f"FFmpeg: {line.decode().strip()}")
 
         threading.Thread(target=log_ffmpeg_stderr, daemon=True).start()
@@ -601,13 +603,8 @@ class HLSEncoder:
             try:
                 self.process.stdin.write(png_data)
                 self.process.stdin.flush()
-            except BrokenPipeError:
-                # Log FFmpeg error before restarting
-                if self.process and self.process.stderr:
-                    stderr = self.process.stderr.read()
-                    if stderr:
-                        logger.error(f"FFmpeg error: {stderr.decode()}")
-                logger.error("FFmpeg pipe broken, restarting encoder")
+            except (BrokenPipeError, OSError) as exc:
+                logger.error("FFmpeg pipe failed (%s); restarting encoder", exc)
                 self.restart()
 
     def restart(self):
@@ -619,7 +616,8 @@ class HLSEncoder:
         """Stop the FFmpeg process."""
         self.running = False
         if self.process:
-            self.process.stdin.close()
+            if self.process.stdin:
+                self.process.stdin.close()
             self.process.terminate()
             try:
                 self.process.wait(timeout=5)
@@ -632,10 +630,17 @@ class HLSEncoder:
 class StreamServer:
     """HTTP server providing HLS streaming endpoints."""
 
-    def __init__(self, capture: DashboardCapture, encoder: HLSEncoder, config: dict):
+    def __init__(
+        self,
+        capture: DashboardCapture,
+        encoder: HLSEncoder,
+        config: dict,
+        frame_store: LatestFrameStore,
+    ):
         self.capture = capture
         self.encoder = encoder
         self.config = config
+        self.frame_store = frame_store
         self.app = web.Application()
         self._setup_routes()
 
@@ -889,30 +894,38 @@ class StreamServer:
         )
 
     async def handle_snapshot(self, request: web.Request) -> web.Response:
-        """Handle single snapshot requests."""
-        png_data, _ = await self.capture.capture_frame()
+        """Serve the newest cached JPEG without touching Selenium."""
+        cached = await self.frame_store.get()
+        if cached is None:
+            return web.Response(status=503, text="Snapshot not ready yet")
 
-        # Convert PNG to JPEG (must convert RGBA to RGB first)
-        img = Image.open(io.BytesIO(png_data))
-        if img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGB")
-        output = io.BytesIO()
-        img.save(output, format="JPEG", quality=85)
-
+        jpeg_data, _ = cached
         return web.Response(
-            body=output.getvalue(),
+            body=jpeg_data,
             content_type="image/jpeg",
-            headers={"Cache-Control": "no-cache"},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
         )
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """Health check endpoint."""
         playlist_exists = (HLS_DIR / "stream.m3u8").exists()
+        cached = await self.frame_store.get()
+        now = asyncio.get_running_loop().time()
+        frame_age_ms = None if cached is None else round((now - cached[1]) * 1000)
+        snapshot_ready = cached is not None
+        stream_ready = playlist_exists and self.encoder.running
         return web.json_response(
             {
-                "status": "healthy" if playlist_exists else "starting",
+                "status": "healthy" if stream_ready and snapshot_ready else "starting",
                 "encoder_running": self.encoder.running,
-                "stream_ready": playlist_exists,
+                "capture_ready": self.capture.driver is not None,
+                "stream_ready": stream_ready,
+                "snapshot_ready": snapshot_ready,
+                "last_frame_age_ms": frame_age_ms,
             }
         )
 
@@ -942,48 +955,100 @@ class StreamServer:
         )
 
 
-async def capture_loop(capture: DashboardCapture, encoder: HLSEncoder, config: dict):
-    """Main loop that captures frames and feeds them to the encoder."""
+def png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
+    """Convert a screenshot to a Roku-friendly JPEG."""
+    img = Image.open(io.BytesIO(png_data))
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGB")
+    output = io.BytesIO()
+    img.save(output, format="JPEG", quality=quality, optimize=True)
+    return output.getvalue()
+
+
+async def encode_loop(encoder: HLSEncoder, frame_queue: asyncio.Queue):
+    """Encode only the newest queued frame, never a stale backlog."""
+    while True:
+        try:
+            png_data = await frame_queue.get()
+            await asyncio.to_thread(encoder.write_frame, png_data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error in encode loop")
+
+
+async def capture_loop(
+    capture: DashboardCapture,
+    frame_queue: asyncio.Queue,
+    frame_store: LatestFrameStore,
+    config: dict,
+):
+    """Capture frames, publish a cached JPEG, and enqueue only the latest PNG."""
     fps = config.get("fps", 2)
     frame_interval = 1.0 / fps
     frame_count = 0
     skipped_frames = 0
-    last_log_time = 0
+    last_log_time = 0.0
 
     logger.info(f"Starting capture loop at {fps} fps ({frame_interval:.3f}s interval)")
 
-    while encoder.running:
+    while True:
         try:
-            start_time = asyncio.get_event_loop().time()
-
-            # Capture frame
+            start_time = asyncio.get_running_loop().time()
             png_data, is_new = await capture.capture_frame()
             frame_count += 1
 
-            # Only encode if frame changed (saves significant CPU)
             if is_new:
-                encoder.write_frame(png_data)
+                jpeg_data = await asyncio.to_thread(png_to_jpeg, png_data)
+                await frame_store.update(
+                    jpeg_data, asyncio.get_running_loop().time()
+                )
+                if put_latest(frame_queue, png_data):
+                    skipped_frames += 1
             else:
                 skipped_frames += 1
 
-            # Log every 30 seconds to reduce log spam
             if start_time - last_log_time >= 30:
                 logger.info(
-                    f"Frames: {frame_count} captured, {skipped_frames} skipped (unchanged)"
+                    "Frames: %s captured, %s skipped (unchanged or superseded)",
+                    frame_count,
+                    skipped_frames,
                 )
                 last_log_time = start_time
 
-            # Wait for next frame, accounting for capture time
-            elapsed = asyncio.get_event_loop().time() - start_time
-            sleep_time = max(0, frame_interval - elapsed)
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+            elapsed = asyncio.get_running_loop().time() - start_time
+            await asyncio.sleep(max(0, frame_interval - elapsed))
 
         except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in capture loop: {e}", exc_info=True)
-            await asyncio.sleep(0.1)
+            raise
+        except Exception:
+            logger.exception("Error in capture loop")
+            await asyncio.sleep(0.5)
+
+
+async def capture_runner(
+    capture: DashboardCapture,
+    frame_queue: asyncio.Queue,
+    frame_store: LatestFrameStore,
+    config: dict,
+):
+    """Keep the service alive while Chromium/HA is temporarily unavailable."""
+    attempt = 1
+    while True:
+        try:
+            await capture.start()
+            attempt = 1
+            await capture_loop(capture, frame_queue, frame_store, config)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Dashboard capture attempt failed; retrying in %ss",
+                retry_delay_seconds(attempt),
+            )
+            await capture.stop()
+            await asyncio.sleep(retry_delay_seconds(attempt))
+            attempt += 1
 
 
 async def main():
@@ -999,6 +1064,7 @@ async def main():
     # Optimized for low CPU usage on Raspberry Pi
     defaults = {
         "dashboard_url": "/lovelace/0",
+        "home_assistant_url": "",
         "kiosk_mode": True,
         "dark_mode": True,
         "width": 1920,
@@ -1025,26 +1091,36 @@ async def main():
             "Create a Long-Lived Access Token in your HA profile and add it to the add-on configuration."
         )
 
-    # Create components
+    # Create components. The server starts before capture so health remains
+    # observable while Chromium or Home Assistant is temporarily unavailable.
     capture = DashboardCapture(config)
     encoder = HLSEncoder(config)
-    server = StreamServer(capture, encoder, config)
+    frame_store = LatestFrameStore()
+    frame_queue = asyncio.Queue(maxsize=1)
+    server = StreamServer(capture, encoder, config, frame_store)
 
-    # Start capture
-    await capture.start()
-
-    # Start encoder
     encoder.start()
 
-    # Start capture loop
-    capture_task = asyncio.create_task(capture_loop(capture, encoder, config))
-
-    # Start HTTP server
     runner = web.AppRunner(server.app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8099)
     await site.start()
     logger.info("Stream server running on http://0.0.0.0:8099")
+
+    loop = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
+
+    def shutdown_handler():
+        logger.info("Shutdown signal received")
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, shutdown_handler)
+
+    encode_task = asyncio.create_task(encode_loop(encoder, frame_queue))
+    capture_task = asyncio.create_task(
+        capture_runner(capture, frame_queue, frame_store, config)
+    )
 
     # Wait for first HLS segment and notify s6 we're ready
     async def notify_ready():
@@ -1060,28 +1136,19 @@ async def main():
             # fd 3 not available (not running under s6)
             logger.debug("fd 3 not available, skipping s6 notification")
 
-    asyncio.create_task(notify_ready())
-
-    # Handle shutdown
-    loop = asyncio.get_event_loop()
-    stop_event = asyncio.Event()
-
-    def shutdown_handler():
-        logger.info("Shutdown signal received")
-        stop_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown_handler)
+    ready_task = asyncio.create_task(notify_ready())
 
     # Wait for shutdown
     await stop_event.wait()
 
     # Cleanup
-    capture_task.cancel()
-    try:
-        await capture_task
-    except asyncio.CancelledError:
-        pass
+    for task in (capture_task, encode_task, ready_task):
+        task.cancel()
+    for task in (capture_task, encode_task, ready_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     encoder.stop()
     await capture.stop()
