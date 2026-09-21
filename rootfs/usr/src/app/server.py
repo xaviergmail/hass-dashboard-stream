@@ -116,7 +116,7 @@ class DashboardCapture:
         """Get the Home Assistant URL from Supervisor API."""
         import aiohttp
 
-        configured_url = self.config.get("home_assistant_url") or ""
+        configured_url = (self.config.get("home_assistant_url") or "").strip()
         if configured_url:
             return configured_url.rstrip("/")
 
@@ -485,9 +485,13 @@ class DashboardCapture:
     async def stop(self):
         """Stop the browser."""
         if self.driver:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self.driver.quit)
+            driver = self.driver
             self.driver = None
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(None, driver.quit)
+            except Exception:
+                logger.warning("Browser shutdown raised; continuing cleanup", exc_info=True)
             logger.info("Dashboard capture stopped")
 
 
@@ -989,6 +993,7 @@ async def capture_loop(
     frame_count = 0
     skipped_frames = 0
     last_log_time = 0.0
+    consecutive_errors = 0
 
     logger.info(f"Starting capture loop at {fps} fps ({frame_interval:.3f}s interval)")
 
@@ -996,6 +1001,7 @@ async def capture_loop(
         try:
             start_time = asyncio.get_running_loop().time()
             png_data, is_new = await capture.capture_frame()
+            consecutive_errors = 0
             frame_count += 1
 
             if is_new:
@@ -1022,7 +1028,10 @@ async def capture_loop(
         except asyncio.CancelledError:
             raise
         except Exception:
+            consecutive_errors += 1
             logger.exception("Error in capture loop")
+            if consecutive_errors >= 3:
+                raise RuntimeError("capture failed three consecutive times")
             await asyncio.sleep(0.5)
 
 

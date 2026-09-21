@@ -10,4 +10,5 @@ dist/
 build/
 .eggs/
 *.log
+dashboard-streams-roku.zip
 .DS_Store
