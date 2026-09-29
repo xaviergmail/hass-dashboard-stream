@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 CONFIG_PATH = Path("/data/options.json")
 HLS_DIR = Path("/tmp/hls")
+HLS_DIR_RESOLVED = HLS_DIR.resolve()
 
 
 class DashboardCapture:
@@ -49,7 +50,7 @@ class DashboardCapture:
     def _create_driver(self) -> webdriver.Chrome:
         """Create a headless Chrome driver optimized for Pi."""
         options = Options()
-        options.add_argument("--headless")
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
@@ -97,6 +98,23 @@ class DashboardCapture:
         """Start the browser and navigate to the dashboard."""
         loop = asyncio.get_event_loop()
         self.driver = await loop.run_in_executor(None, self._create_driver)
+
+        # Set exact viewport size using CDP (set_window_size sets outer size, not viewport)
+        width = self.config.get("width", 1920)
+        height = self.config.get("height", 1080)
+        await loop.run_in_executor(
+            None,
+            lambda: self.driver.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            ),
+        )
+        logger.info(f"Set viewport size to {width}x{height} via CDP")
 
         # Force dark mode via CDP if enabled
         if self.config.get("dark_mode", True):
@@ -533,11 +551,14 @@ class HLSEncoder:
             "lavfi",
             "-i",
             "anullsrc=r=44100:cl=stereo",
+            # Ensure even dimensions and convert to yuv420p (x264 requires both)
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
             # Video encoding - Roku compatible settings
             "-c:v",
             "libx264",
             "-profile:v",
-            "main",  # Roku requires baseline or main profile
+            "main",
             "-level",
             "4.0",
             "-preset",
@@ -546,8 +567,6 @@ class HLSEncoder:
             "zerolatency",
             "-crf",
             str(quality),
-            "-pix_fmt",
-            "yuv420p",
             "-r",
             str(fps),
             "-g",
@@ -559,16 +578,15 @@ class HLSEncoder:
             "aac",
             "-b:a",
             "32k",
-            "-shortest",  # End when video ends
             # HLS output settings
             "-f",
             "hls",
             "-hls_time",
             str(segment_time),
             "-hls_list_size",
-            "6",  # More segments for Roku stability
+            "5",
             "-hls_flags",
-            "delete_segments+discont_start+omit_endlist",
+            "delete_segments+append_list",
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",
@@ -603,13 +621,18 @@ class HLSEncoder:
 
     def write_frame(self, png_data: bytes):
         """Write a PNG frame to FFmpeg."""
-        if self.process and self.process.stdin:
-            try:
-                self.process.stdin.write(png_data)
-                self.process.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
-                logger.error("FFmpeg pipe failed (%s); restarting encoder", exc)
-                self.restart()
+        if not self.process or not self.process.stdin:
+            logger.warning("FFmpeg process not ready, skipping frame")
+            return
+        if not png_data:
+            logger.warning("Empty frame data, skipping")
+            return
+        try:
+            self.process.stdin.write(png_data)
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            logger.error("FFmpeg pipe failed (%s); restarting encoder", exc)
+            self.restart()
 
     def restart(self):
         """Restart the encoder."""
@@ -645,11 +668,37 @@ class StreamServer:
         self.encoder = encoder
         self.config = config
         self.frame_store = frame_store
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[self._cors_middleware])
         self._setup_routes()
+
+    @web.middleware
+    async def _cors_middleware(self, request: web.Request, handler):
+        """Add CORS headers to all responses."""
+        # Handle preflight OPTIONS requests
+        if request.method == "OPTIONS":
+            return web.Response(
+                status=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Range",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
+
+        # Process the request and add CORS headers to response
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Expose-Headers"] = (
+            "Content-Length, Content-Range"
+        )
+        return response
 
     def _setup_routes(self):
         """Set up HTTP routes."""
+        # Add OPTIONS handler for all routes
+        self.app.router.add_route("OPTIONS", "/{path:.*}", self._handle_options)
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/stream.m3u8", self.handle_playlist)
         self.app.router.add_get("/segment_{name}.ts", self.handle_segment)
@@ -659,7 +708,13 @@ class StreamServer:
         self.app.router.add_post("/api/refresh", self.handle_refresh)
         # Serve HLS files with proper cache headers (no static serving to avoid 304s)
         self.app.router.add_get("/hls/stream.m3u8", self.handle_playlist)
+        self.app.router.add_get("/hls/loading.ts", self.handle_loading_segment)
         self.app.router.add_get("/hls/{name}.ts", self.handle_hls_segment)
+        self.app.router.add_get("/loading.ts", self.handle_loading_segment)
+
+    async def _handle_options(self, request: web.Request) -> web.Response:
+        """Handle OPTIONS preflight requests."""
+        return web.Response(status=204)
 
     async def handle_index(self, request: web.Request) -> web.Response:
         """Serve the index page with stream info."""
@@ -852,12 +907,35 @@ class StreamServer:
     async def handle_playlist(self, request: web.Request) -> web.Response:
         """Serve the HLS playlist file."""
         playlist_path = HLS_DIR / "stream.m3u8"
-        if not playlist_path.exists():
-            return web.Response(status=503, text="Stream not ready yet")
+        segment_duration = self.config.get("segment_duration", 4)
 
-        # Read file content directly to avoid FileResponse's ETag/Last-Modified
-        # which cause 304 responses on live streams
-        content = playlist_path.read_text()
+        # Check if real stream has enough segments (at least 2)
+        real_segments = list(HLS_DIR.glob("segment_*.ts"))
+        stream_ready = playlist_path.exists() and len(real_segments) >= 2
+
+        if not stream_ready:
+            # Return loading playlist that increments sequence to simulate live stream
+            # Use current time to create incrementing sequence numbers
+            import time
+
+            seq = int(time.time()) % 10000
+
+            content = f"""#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:{segment_duration}
+#EXT-X-MEDIA-SEQUENCE:{seq}
+#EXTINF:{segment_duration}.0,
+loading.ts
+#EXTINF:{segment_duration}.0,
+loading.ts
+#EXTINF:{segment_duration}.0,
+loading.ts
+"""
+        else:
+            # Read file content directly to avoid FileResponse's ETag/Last-Modified
+            # which cause 304 responses on live streams
+            content = playlist_path.read_text()
+
         return web.Response(
             text=content,
             content_type="application/vnd.apple.mpegurl",
@@ -881,9 +959,13 @@ class StreamServer:
 
     async def _serve_segment(self, filename: str) -> web.Response:
         """Serve a segment file with proper headers."""
-        segment_path = HLS_DIR / filename
+        try:
+            segment_path = (HLS_DIR / filename).resolve()
+            segment_path.relative_to(HLS_DIR_RESOLVED)
+        except (OSError, ValueError, RuntimeError):
+            return web.Response(status=404, text="Segment not found")
 
-        if not segment_path.exists():
+        if not segment_path.is_file():
             return web.Response(status=404, text="Segment not found")
 
         # Read content directly to avoid ETag/Last-Modified from FileResponse
@@ -896,6 +978,85 @@ class StreamServer:
                 "Access-Control-Allow-Origin": "*",
             },
         )
+
+    async def handle_loading_segment(self, request: web.Request) -> web.Response:
+        """Serve a placeholder loading segment while stream initializes."""
+        # Generate loading segment on first request, then cache it
+        if not hasattr(self, "_loading_segment"):
+            self._loading_segment = await self._generate_loading_segment()
+
+        return web.Response(
+            body=self._loading_segment,
+            content_type="video/mp2t",
+            headers={
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    async def _generate_loading_segment(self) -> bytes:
+        """Generate a 4-second black video segment (placeholder while stream loads)."""
+        import tempfile
+
+        width = self.config.get("width", 1920)
+        height = self.config.get("height", 1080)
+        fps = self.config.get("fps", 2)
+
+        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
+            output_path = f.name
+
+        try:
+            # Generate simple black video with silent audio (no text to avoid font issues)
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=0x1a1a2e:s={width}x{height}:d=4:r={fps}",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-level",
+                "4.0",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "32k",
+                "-t",
+                "4",
+                "-f",
+                "mpegts",
+                output_path,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                logger.error(f"Failed to generate loading segment: {stderr.decode()}")
+                return b""
+
+            with open(output_path, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.unlink(output_path)
+            except:
+                pass
 
     async def handle_snapshot(self, request: web.Request) -> web.Response:
         """Serve the newest cached JPEG without touching Selenium."""
@@ -1136,10 +1297,13 @@ async def main():
         playlist_path = Path("/tmp/hls/stream.m3u8")
         while not playlist_path.exists():
             await asyncio.sleep(0.5)
-        # Notify s6 via fd 3
+        # Notify s6 via fd 3 (only if running under s6)
         try:
-            with os.fdopen(3, "w") as f:
-                f.write("\n")
+            # Check if fd 3 exists before trying to use it
+            import stat
+
+            os.fstat(3)
+            os.write(3, b"\n")
             logger.info("Notified s6 that service is ready")
         except OSError:
             # fd 3 not available (not running under s6)
