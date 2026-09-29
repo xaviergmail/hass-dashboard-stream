@@ -1,6 +1,6 @@
 sub init()
     ' The add-on serves a single cached JPEG, avoiding Roku HLS buffering.
-    m.snapshotUrl = "http://homeassistant:8099/snapshot.jpg"
+    m.snapshotUrl = "http://dashboard-streams.local:8099/snapshot.jpg"
     m.poster = m.top.FindNode("poster")
     m.status = m.top.FindNode("status")
     m.timer = m.top.FindNode("refreshTimer")

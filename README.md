@@ -98,7 +98,7 @@ For generic Roku HLS players, use:
 
 For the lowest-latency Roku display, use the bundled snapshot channel in `roku/`:
 
-1. If the add-on is not at `homeassistant`, edit `roku/source/MainScene.brs` and change `m.snapshotUrl`.
+1. Edit `roku/source/MainScene.brs` and set `m.snapshotUrl` to the address of your Dashboard Streams add-on.
 2. Package it from the repository root:
    ```sh
    (cd roku && zip -r ../dashboard-streams-roku.zip manifest source)
