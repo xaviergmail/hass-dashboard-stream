@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import signal
@@ -960,14 +959,18 @@ loading.ts
 
     async def _serve_segment(self, filename: str) -> web.Response:
         """Serve a segment file with proper headers."""
-        safe_filename = Path(filename).name
-        if (
-            safe_filename != filename
-            or not re.fullmatch(r"(?:segment_)?[A-Za-z0-9_-]+\.ts", safe_filename)
-        ):
+        if not filename or Path(filename).name != filename:
             return web.Response(status=404, text="Segment not found")
+
+        segment_path = next(
+            (candidate for candidate in HLS_DIR.glob("*.ts") if candidate.name == filename),
+            None,
+        )
+        if segment_path is None:
+            return web.Response(status=404, text="Segment not found")
+
         try:
-            segment_path = (HLS_DIR / safe_filename).resolve()
+            segment_path = segment_path.resolve()
             segment_path.relative_to(HLS_DIR_RESOLVED)
         except (OSError, ValueError, RuntimeError):
             return web.Response(status=404, text="Segment not found")
