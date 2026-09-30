@@ -18,6 +18,13 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from PIL import Image
 
+from stream_core import (
+    LatestFrameStore,
+    put_latest,
+    resolve_dashboard_url,
+    retry_delay_seconds,
+)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -26,6 +33,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 CONFIG_PATH = Path("/data/options.json")
 HLS_DIR = Path("/tmp/hls")
+HLS_DIR_RESOLVED = HLS_DIR.resolve()
 
 
 class DashboardCapture:
@@ -37,11 +45,12 @@ class DashboardCapture:
         self.driver: Optional[webdriver.Chrome] = None
         self.lock = asyncio.Lock()
         self.kiosk_mode_detected: Optional[bool] = None
+        self._last_frame_hash: Optional[int] = None
 
     def _create_driver(self) -> webdriver.Chrome:
         """Create a headless Chrome driver optimized for Pi."""
         options = Options()
-        options.add_argument("--headless")
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
@@ -52,11 +61,33 @@ class DashboardCapture:
         options.add_argument("--disable-translate")
         options.add_argument("--disable-default-apps")
         options.add_argument("--no-first-run")
-        options.add_argument("--single-process")  # Reduce memory on Pi
         options.add_argument(
             f"--window-size={self.config.get('width', 1920)},{self.config.get('height', 1080)}"
         )
         options.add_argument("--hide-scrollbars")
+        options.add_argument("--ignore-certificate-errors")
+        options.add_argument("--ignore-ssl-errors")
+        options.add_argument("--allow-insecure-localhost")
+
+        # Additional CPU optimization flags
+        options.add_argument("--disable-animations")
+        options.add_argument("--disable-canvas-aa")  # Disable canvas anti-aliasing
+        options.add_argument("--disable-2d-canvas-clip-aa")
+        options.add_argument("--disable-gl-drawing-for-tests")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-breakpad")  # Disable crash reporting
+        options.add_argument("--disable-component-update")
+        options.add_argument("--disable-domain-reliability")
+        options.add_argument("--disable-features=TranslateUI")
+        options.add_argument("--disable-hang-monitor")
+        options.add_argument("--disable-ipc-flooding-protection")
+        options.add_argument("--disable-popup-blocking")
+        options.add_argument("--disable-prompt-on-repost")
+        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--memory-pressure-off")
+        options.add_argument("--js-flags=--max-old-space-size=128")  # Limit JS heap
 
         options.binary_location = "/usr/bin/chromium-browser"
 
@@ -67,6 +98,23 @@ class DashboardCapture:
         """Start the browser and navigate to the dashboard."""
         loop = asyncio.get_event_loop()
         self.driver = await loop.run_in_executor(None, self._create_driver)
+
+        # Set exact viewport size using CDP (set_window_size sets outer size, not viewport)
+        width = self.config.get("width", 1920)
+        height = self.config.get("height", 1080)
+        await loop.run_in_executor(
+            None,
+            lambda: self.driver.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            ),
+        )
+        logger.info(f"Set viewport size to {width}x{height} via CDP")
 
         # Force dark mode via CDP if enabled
         if self.config.get("dark_mode", True):
@@ -82,32 +130,84 @@ class DashboardCapture:
         await self._navigate_to_dashboard()
         logger.info("Dashboard capture started")
 
+    async def _get_ha_url(self) -> str:
+        """Get the Home Assistant URL from Supervisor API."""
+        import aiohttp
+
+        configured_url = (self.config.get("home_assistant_url") or "").strip()
+        if configured_url:
+            return configured_url.rstrip("/")
+
+        supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
+        if not supervisor_token:
+            logger.warning("No SUPERVISOR_TOKEN, falling back to default HA URL")
+            return "http://homeassistant:8123"
+
+        headers = {
+            "Authorization": f"Bearer {supervisor_token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # First try to get the configured external/internal URL from HA config
+                async with session.get(
+                    "http://supervisor/core/api/config",
+                    headers=headers,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Try internal_url first, then external_url
+                        internal_url = data.get("internal_url")
+                        external_url = data.get("external_url")
+
+                        if internal_url:
+                            logger.info(
+                                f"Using internal_url from HA config: {internal_url}"
+                            )
+                            return internal_url.rstrip("/")
+                        elif external_url:
+                            logger.info(
+                                f"Using external_url from HA config: {external_url}"
+                            )
+                            return external_url.rstrip("/")
+
+                # Fallback: Get Home Assistant info from Supervisor
+                async with session.get(
+                    "http://supervisor/core/info",
+                    headers=headers,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        info = data.get("data", data)
+                        ip = info.get("ip_address", "homeassistant")
+                        port = info.get("port", 8123)
+                        ssl = info.get("ssl", False)
+
+                        scheme = "https" if ssl else "http"
+                        url = f"{scheme}://{ip}:{port}"
+                        logger.info(f"Got HA URL from Supervisor info: {url}")
+                        return url
+                    else:
+                        logger.warning(f"Failed to get HA info: {resp.status}")
+        except Exception as e:
+            logger.warning(f"Error getting HA URL: {e}")
+
+        return "http://homeassistant:8123"
+
     async def _navigate_to_dashboard(self):
         """Navigate to the Home Assistant dashboard."""
         dashboard_url = self.config["dashboard_url"]
         kiosk_mode = self.config.get("kiosk_mode", True)
 
-        # Append ?kiosk if kiosk_mode is enabled and not already present
-        if kiosk_mode and "kiosk" not in dashboard_url:
-            if "?" in dashboard_url:
-                dashboard_url = f"{dashboard_url}&kiosk"
-            else:
-                dashboard_url = f"{dashboard_url}?kiosk"
-            logger.info(f"Kiosk mode enabled, URL: {dashboard_url}")
-
-        # Determine the base URL and full URL
-        if dashboard_url.startswith("http://") or dashboard_url.startswith("https://"):
-            # External URL (for testing or external dashboards)
-            full_url = dashboard_url
-            base_url = "/".join(full_url.split("/")[:3])
-        elif dashboard_url.startswith("/"):
-            # Relative path - use internal HA connection
-            # 'homeassistant' is the internal hostname for HA core in the Docker network
-            base_url = "http://homeassistant:8123"
-            full_url = f"{base_url}{dashboard_url}"
-        else:
-            full_url = dashboard_url
-            base_url = None
+        home_assistant_url = (
+            await self._get_ha_url() if dashboard_url.startswith("/") else ""
+        )
+        full_url, base_url = resolve_dashboard_url(
+            dashboard_url, home_assistant_url, kiosk_mode
+        )
+        if kiosk_mode:
+            logger.info(f"Kiosk mode URL: {full_url}")
 
         # Use the long-lived access token we created
         token = self.access_token
@@ -116,52 +216,116 @@ class DashboardCapture:
 
         def navigate():
             import time
+            from urllib.parse import urlparse
 
             if token and base_url:
                 logger.info(f"Setting up authentication for {base_url}")
 
-                # First navigate to base URL to initialize the page
+                # Parse the base URL to get the canonical form (without default port)
+                parsed = urlparse(base_url)
+                # Build canonical URL without explicit port if it's the default
+                if (parsed.scheme == "https" and parsed.port == 443) or (
+                    parsed.scheme == "http" and parsed.port == 80
+                ):
+                    canonical_url = f"{parsed.scheme}://{parsed.hostname}"
+                else:
+                    canonical_url = base_url.rstrip("/")
+
+                logger.info(f"Canonical URL for auth: {canonical_url}")
+
+                # Navigate to base URL first to set up the origin
                 self.driver.get(base_url)
-                time.sleep(2)
+                time.sleep(3)
 
                 # Inject the long-lived access token into localStorage
-                # Format based on HA frontend's auth storage
-                self.driver.execute_script(f"""
-                    // Store token in the format HA frontend expects
-                    const tokenData = {{
-                        hassUrl: "{base_url}",
-                        clientId: "{base_url}/",
-                        expires: Date.now() + 315360000000,  // 10 years (long-lived token)
-                        refresh_token: "",
-                        access_token: "{token}",
-                        expires_in: 315360000,
-                        token_type: "Bearer"
-                    }};
-                    localStorage.setItem("hassTokens", JSON.stringify(tokenData));
-                    console.log("Token injected:", tokenData.hassUrl);
-                """)
+                # Use both the original URL and canonical URL formats
+                try:
+                    self.driver.execute_script(f"""
+                        // Store token in the format HA frontend expects
+                        // Try multiple URL formats to match what HA might use
+                        const urls = ["{base_url}", "{canonical_url}", "{canonical_url}/"];
+                        
+                        for (const hassUrl of urls) {{
+                            const tokenData = {{
+                                hassUrl: hassUrl,
+                                clientId: hassUrl.endsWith('/') ? hassUrl : hassUrl + '/',
+                                expires: Date.now() + 315360000000,
+                                refresh_token: "",
+                                access_token: "{token}",
+                                expires_in: 315360000,
+                                token_type: "Bearer"
+                            }};
+                            localStorage.setItem("hassTokens", JSON.stringify(tokenData));
+                        }}
+                        
+                        console.log("Token injected for multiple URL formats");
+                    """)
+                    logger.info("Token injected into localStorage")
+                except Exception as e:
+                    logger.warning(f"Failed to inject token: {e}")
 
-                logger.info("Token injected, refreshing page")
+                # Reload to pick up the token
                 time.sleep(1)
+                self.driver.refresh()
+                time.sleep(3)
 
             logger.info(f"Navigating to: {full_url}")
             self.driver.get(full_url)
 
             # Wait for page to load
-            time.sleep(5)
+            time.sleep(8)
 
             # Log debug info
-            logger.info(f"Current URL: {self.driver.current_url}")
+            current_url = self.driver.current_url
+            logger.info(f"Current URL: {current_url}")
             logger.info(f"Page title: {self.driver.title}")
 
             # Check if we hit the login page
-            if "auth" in self.driver.current_url:
+            if "auth" in current_url:
                 logger.warning("Authentication may have failed - URL contains 'auth'")
+
+                # If we're on the auth page, try to inject token and redirect
                 try:
-                    body_text = self.driver.find_element("tag name", "body").text[:500]
-                    logger.warning(f"Page content: {body_text}")
-                except:
-                    pass
+                    # Get what HA thinks the hassUrl should be from the state parameter
+                    import base64
+                    import json as json_module
+                    from urllib.parse import parse_qs, urlparse as url_parse
+
+                    parsed_url = url_parse(current_url)
+                    params = parse_qs(parsed_url.query)
+                    if "state" in params:
+                        state_data = json_module.loads(
+                            base64.b64decode(params["state"][0])
+                        )
+                        ha_url = state_data.get("hassUrl", "")
+                        client_id = state_data.get("clientId", "")
+                        logger.info(
+                            f"HA expects hassUrl: {ha_url}, clientId: {client_id}"
+                        )
+
+                        # Re-inject with the exact URL HA expects
+                        self.driver.execute_script(f"""
+                            const tokenData = {{
+                                hassUrl: "{ha_url}",
+                                clientId: "{client_id}",
+                                expires: Date.now() + 315360000000,
+                                refresh_token: "",
+                                access_token: "{token}",
+                                expires_in: 315360000,
+                                token_type: "Bearer"
+                            }};
+                            localStorage.setItem("hassTokens", JSON.stringify(tokenData));
+                            console.log("Re-injected token with correct hassUrl");
+                        """)
+
+                        # Navigate back to the dashboard
+                        time.sleep(1)
+                        self.driver.get(full_url)
+                        time.sleep(5)
+
+                        logger.info(f"After re-auth, URL: {self.driver.current_url}")
+                except Exception as e:
+                    logger.warning(f"Failed to re-inject token: {e}")
 
         await loop.run_in_executor(None, navigate)
         logger.info(f"Navigated to dashboard: {full_url}")
@@ -305,81 +469,47 @@ class DashboardCapture:
         except Exception as e:
             logger.warning(f"Error checking for kiosk-mode via API: {e}")
             self.kiosk_mode_detected = None
-            return
 
-        # Use Supervisor API to talk to Home Assistant
-        base_url = "http://supervisor/core/api"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
+    async def capture_frame(self) -> tuple[bytes, bool]:
+        """Capture a PNG screenshot of the current dashboard.
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Query HACS installed repositories via frontend/extra_modules or check for kiosk-mode resources
-                # Method 1: Check Lovelace resources for kiosk-mode
-                async with session.get(
-                    f"{base_url}/lovelace/resources",
-                    headers=headers,
-                ) as resp:
-                    if resp.status == 200:
-                        resources = await resp.json()
-                        # Look for kiosk-mode in the resources
-                        for resource in resources:
-                            url = resource.get("url", "")
-                            if "kiosk-mode" in url.lower():
-                                logger.info(
-                                    f"Kiosk-mode found in Lovelace resources: {url}"
-                                )
-                                self.kiosk_mode_detected = True
-                                return
-                    else:
-                        logger.debug(f"Lovelace resources API returned {resp.status}")
-
-                # Method 2: Check frontend extra_module_url in HA config
-                async with session.get(
-                    f"{base_url}/config",
-                    headers=headers,
-                ) as resp:
-                    if resp.status == 200:
-                        config = await resp.json()
-                        # Check frontend config for kiosk-mode
-                        frontend = config.get("frontend", {})
-                        extra_modules = frontend.get("extra_module_url", [])
-                        for url in extra_modules:
-                            if "kiosk-mode" in url.lower():
-                                logger.info(
-                                    f"Kiosk-mode found in frontend config: {url}"
-                                )
-                                self.kiosk_mode_detected = True
-                                return
-
-            # If we got here, kiosk-mode wasn't found
-            logger.warning(
-                "Kiosk-mode not found in Lovelace resources or frontend config"
-            )
-            self.kiosk_mode_detected = False
-
-        except Exception as e:
-            logger.warning(f"Error checking for kiosk-mode via API: {e}")
-            self.kiosk_mode_detected = None
-
-    async def capture_frame(self) -> bytes:
-        """Capture a PNG screenshot of the current dashboard."""
+        Returns:
+            Tuple of (png_data, is_new_frame) - is_new_frame is False if identical to last frame
+        """
         async with self.lock:
             loop = asyncio.get_event_loop()
 
             def take_screenshot() -> bytes:
                 return self.driver.get_screenshot_as_png()
 
-            return await loop.run_in_executor(None, take_screenshot)
+            png_data = await loop.run_in_executor(None, take_screenshot)
+
+            # Quick hash to detect duplicate frames (saves CPU on encoding)
+            frame_hash = hash(png_data)
+            is_new = frame_hash != self._last_frame_hash
+            self._last_frame_hash = frame_hash
+
+            return png_data, is_new
+
+    async def refresh(self):
+        """Refresh the current page in the browser."""
+        if self.driver:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.driver.refresh)
+            logger.info("Dashboard page refreshed")
+            return True
+        return False
 
     async def stop(self):
         """Stop the browser."""
         if self.driver:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self.driver.quit)
+            driver = self.driver
             self.driver = None
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(None, driver.quit)
+            except Exception:
+                logger.warning("Browser shutdown raised; continuing cleanup", exc_info=True)
             logger.info("Dashboard capture stopped")
 
 
@@ -407,6 +537,7 @@ class HLSEncoder:
         cmd = [
             "ffmpeg",
             "-y",
+            # Video input from screenshots
             "-f",
             "image2pipe",
             "-vcodec",
@@ -415,32 +546,47 @@ class HLSEncoder:
             str(fps),
             "-i",
             "-",
-            # Video encoding - low latency settings
+            # Silent audio track (required for Roku compatibility)
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=stereo",
+            # Ensure even dimensions and convert to yuv420p (x264 requires both)
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
+            # Video encoding - Roku compatible settings
             "-c:v",
             "libx264",
+            "-profile:v",
+            "main",
+            "-level",
+            "4.0",
             "-preset",
             "ultrafast",
             "-tune",
-            "zerolatency",  # Changed from stillimage to zerolatency
+            "zerolatency",
             "-crf",
             str(quality),
-            "-pix_fmt",
-            "yuv420p",
             "-r",
             str(fps),
             "-g",
-            str(fps),  # Keyframe every second (faster segment start)
+            str(fps * 2),  # Keyframe every 2 seconds
             "-sc_threshold",
             "0",
-            # Low latency HLS settings
+            # Audio encoding (silent)
+            "-c:a",
+            "aac",
+            "-b:a",
+            "32k",
+            # HLS output settings
             "-f",
             "hls",
             "-hls_time",
-            str(segment_time),  # 2 second segments
+            str(segment_time),
             "-hls_list_size",
-            "3",  # Minimal playlist (3 x 2s = 6s)
+            "5",
             "-hls_flags",
-            "delete_segments+discont_start+omit_endlist+split_by_time",
+            "delete_segments+append_list",
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",
@@ -461,8 +607,12 @@ class HLSEncoder:
         # Start a thread to log FFmpeg stderr
         import threading
 
+        process = self.process
+
         def log_ffmpeg_stderr():
-            for line in self.process.stderr:
+            if process is None or process.stderr is None:
+                return
+            for line in process.stderr:
                 logger.info(f"FFmpeg: {line.decode().strip()}")
 
         threading.Thread(target=log_ffmpeg_stderr, daemon=True).start()
@@ -471,18 +621,18 @@ class HLSEncoder:
 
     def write_frame(self, png_data: bytes):
         """Write a PNG frame to FFmpeg."""
-        if self.process and self.process.stdin:
-            try:
-                self.process.stdin.write(png_data)
-                self.process.stdin.flush()
-            except BrokenPipeError:
-                # Log FFmpeg error before restarting
-                if self.process and self.process.stderr:
-                    stderr = self.process.stderr.read()
-                    if stderr:
-                        logger.error(f"FFmpeg error: {stderr.decode()}")
-                logger.error("FFmpeg pipe broken, restarting encoder")
-                self.restart()
+        if not self.process or not self.process.stdin:
+            logger.warning("FFmpeg process not ready, skipping frame")
+            return
+        if not png_data:
+            logger.warning("Empty frame data, skipping")
+            return
+        try:
+            self.process.stdin.write(png_data)
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            logger.error("FFmpeg pipe failed (%s); restarting encoder", exc)
+            self.restart()
 
     def restart(self):
         """Restart the encoder."""
@@ -493,7 +643,8 @@ class HLSEncoder:
         """Stop the FFmpeg process."""
         self.running = False
         if self.process:
-            self.process.stdin.close()
+            if self.process.stdin:
+                self.process.stdin.close()
             self.process.terminate()
             try:
                 self.process.wait(timeout=5)
@@ -506,23 +657,64 @@ class HLSEncoder:
 class StreamServer:
     """HTTP server providing HLS streaming endpoints."""
 
-    def __init__(self, capture: DashboardCapture, encoder: HLSEncoder, config: dict):
+    def __init__(
+        self,
+        capture: DashboardCapture,
+        encoder: HLSEncoder,
+        config: dict,
+        frame_store: LatestFrameStore,
+    ):
         self.capture = capture
         self.encoder = encoder
         self.config = config
-        self.app = web.Application()
+        self.frame_store = frame_store
+        self.app = web.Application(middlewares=[self._cors_middleware])
         self._setup_routes()
+
+    @web.middleware
+    async def _cors_middleware(self, request: web.Request, handler):
+        """Add CORS headers to all responses."""
+        # Handle preflight OPTIONS requests
+        if request.method == "OPTIONS":
+            return web.Response(
+                status=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Range",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
+
+        # Process the request and add CORS headers to response
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Expose-Headers"] = (
+            "Content-Length, Content-Range"
+        )
+        return response
 
     def _setup_routes(self):
         """Set up HTTP routes."""
+        # Add OPTIONS handler for all routes
+        self.app.router.add_route("OPTIONS", "/{path:.*}", self._handle_options)
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/stream.m3u8", self.handle_playlist)
         self.app.router.add_get("/segment_{name}.ts", self.handle_segment)
         self.app.router.add_get("/snapshot.jpg", self.handle_snapshot)
         self.app.router.add_get("/health", self.handle_health)
         self.app.router.add_get("/api/kiosk-status", self.handle_kiosk_status)
-        # Serve HLS files directly
-        self.app.router.add_static("/hls/", HLS_DIR, show_index=False)
+        self.app.router.add_post("/api/refresh", self.handle_refresh)
+        # Serve HLS files with proper cache headers (no static serving to avoid 304s)
+        self.app.router.add_get("/hls/stream.m3u8", self.handle_playlist)
+        self.app.router.add_get("/hls/loading.ts", self.handle_loading_segment)
+        self.app.router.add_get("/hls/{name}.ts", self.handle_hls_segment)
+        self.app.router.add_get("/loading.ts", self.handle_loading_segment)
+
+    async def _handle_options(self, request: web.Request) -> web.Response:
+        """Handle OPTIONS preflight requests."""
+        return web.Response(status=204)
 
     async def handle_index(self, request: web.Request) -> web.Response:
         """Serve the index page with stream info."""
@@ -570,6 +762,14 @@ class StreamServer:
         .config-item {{ background: #2d2d2d; padding: 15px; border-radius: 8px; }}
         .config-item label {{ color: #888; font-size: 12px; text-transform: uppercase; }}
         .config-item value {{ font-size: 18px; color: #fff; display: block; margin-top: 5px; }}
+        .btn {{ background: #03a9f4; color: #fff; border: none; padding: 12px 24px; 
+               border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500;
+               transition: background 0.2s; }}
+        .btn:hover {{ background: #0288d1; }}
+        .btn:active {{ background: #0277bd; }}
+        .btn:disabled {{ background: #555; cursor: not-allowed; }}
+        .actions {{ margin-top: 20px; display: flex; gap: 10px; align-items: center; }}
+        .action-status {{ color: #888; font-size: 14px; }}
         
         .kiosk-notice {{
             background: #2d2d2d;
@@ -596,7 +796,7 @@ class StreamServer:
         <h3>HLS Playlist (Primary)</h3>
         <p><code>GET /hls/stream.m3u8</code></p>
         <p>Use this URL in Roku, Apple TV, Chromecast, VLC, or any HLS-compatible player.</p>
-        <p>Full URL: <code>http://&lt;your-ha-ip&gt;:8099/hls/stream.m3u8</code></p>
+        <p>Full URL: <code>http://{host}/hls/stream.m3u8</code></p>
     </div>
     
     <div class="endpoint">
@@ -634,6 +834,11 @@ class StreamServer:
         </div>
     </div>
     
+    <div class="actions">
+        <button class="btn" id="refreshBtn" onclick="refreshDashboard()">Refresh Dashboard</button>
+        <span class="action-status" id="refreshStatus"></span>
+    </div>
+    
     <div class="preview">
         <h2>Live Preview</h2>
         <video id="video" controls autoplay muted></video>
@@ -644,6 +849,34 @@ class StreamServer:
         const streamUrl = '{stream_url}';
         const baseUrl = '{base_url}';
         const segmentDuration = {self.config.get("segment_duration", 2)};
+        
+        async function refreshDashboard() {{
+            const btn = document.getElementById('refreshBtn');
+            const status = document.getElementById('refreshStatus');
+            
+            btn.disabled = true;
+            status.textContent = 'Refreshing...';
+            status.style.color = '#888';
+            
+            try {{
+                const response = await fetch(baseUrl + '/api/refresh', {{ method: 'POST' }});
+                const data = await response.json();
+                
+                if (data.success) {{
+                    status.textContent = 'Dashboard refreshed!';
+                    status.style.color = '#4caf50';
+                }} else {{
+                    status.textContent = data.message || 'Refresh failed';
+                    status.style.color = '#f44336';
+                }}
+            }} catch (err) {{
+                status.textContent = 'Error: ' + err.message;
+                status.style.color = '#f44336';
+            }}
+            
+            btn.disabled = false;
+            setTimeout(() => {{ status.textContent = ''; }}, 3000);
+        }}
         
         if (Hls.isSupported()) {{
             const hls = new Hls({{
@@ -674,60 +907,200 @@ class StreamServer:
     async def handle_playlist(self, request: web.Request) -> web.Response:
         """Serve the HLS playlist file."""
         playlist_path = HLS_DIR / "stream.m3u8"
-        if not playlist_path.exists():
-            return web.Response(status=503, text="Stream not ready yet")
+        segment_duration = self.config.get("segment_duration", 4)
 
-        return web.FileResponse(
-            playlist_path,
+        # Check if real stream has enough segments (at least 2)
+        real_segments = list(HLS_DIR.glob("segment_*.ts"))
+        stream_ready = playlist_path.exists() and len(real_segments) >= 2
+
+        if not stream_ready:
+            # Return loading playlist that increments sequence to simulate live stream
+            # Use current time to create incrementing sequence numbers
+            import time
+
+            seq = int(time.time()) % 10000
+
+            content = f"""#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:{segment_duration}
+#EXT-X-MEDIA-SEQUENCE:{seq}
+#EXTINF:{segment_duration}.0,
+loading.ts
+#EXTINF:{segment_duration}.0,
+loading.ts
+#EXTINF:{segment_duration}.0,
+loading.ts
+"""
+        else:
+            # Read file content directly to avoid FileResponse's ETag/Last-Modified
+            # which cause 304 responses on live streams
+            content = playlist_path.read_text()
+
+        return web.Response(
+            text=content,
+            content_type="application/vnd.apple.mpegurl",
             headers={
-                "Content-Type": "application/vnd.apple.mpegurl",
                 "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
                 "Access-Control-Allow-Origin": "*",
             },
         )
 
     async def handle_segment(self, request: web.Request) -> web.Response:
-        """Serve HLS segment files."""
+        """Serve HLS segment files (legacy route)."""
         name = request.match_info["name"]
-        segment_path = HLS_DIR / f"segment_{name}.ts"
+        return await self._serve_segment(f"segment_{name}.ts")
 
-        if not segment_path.exists():
+    async def handle_hls_segment(self, request: web.Request) -> web.Response:
+        """Serve HLS segment files from /hls/ path."""
+        name = request.match_info["name"]
+        return await self._serve_segment(f"{name}.ts")
+
+    async def _serve_segment(self, filename: str) -> web.Response:
+        """Serve a segment file with proper headers."""
+        if not filename or Path(filename).name != filename:
             return web.Response(status=404, text="Segment not found")
 
-        return web.FileResponse(
-            segment_path,
+        segment_path = next(
+            (candidate for candidate in HLS_DIR.glob("*.ts") if candidate.name == filename),
+            None,
+        )
+        if segment_path is None:
+            return web.Response(status=404, text="Segment not found")
+
+        try:
+            segment_path = segment_path.resolve()
+            segment_path.relative_to(HLS_DIR_RESOLVED)
+        except (OSError, ValueError, RuntimeError):
+            return web.Response(status=404, text="Segment not found")
+
+        if not segment_path.is_file():
+            return web.Response(status=404, text="Segment not found")
+
+        # Read content directly to avoid ETag/Last-Modified from FileResponse
+        content = segment_path.read_bytes()
+        return web.Response(
+            body=content,
+            content_type="video/mp2t",
             headers={
-                "Content-Type": "video/mp2t",
                 "Cache-Control": "max-age=3600",
                 "Access-Control-Allow-Origin": "*",
             },
         )
 
-    async def handle_snapshot(self, request: web.Request) -> web.Response:
-        """Handle single snapshot requests."""
-        png_data = await self.capture.capture_frame()
-
-        # Convert PNG to JPEG (must convert RGBA to RGB first)
-        img = Image.open(io.BytesIO(png_data))
-        if img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGB")
-        output = io.BytesIO()
-        img.save(output, format="JPEG", quality=85)
+    async def handle_loading_segment(self, request: web.Request) -> web.Response:
+        """Serve a placeholder loading segment while stream initializes."""
+        # Generate loading segment on first request, then cache it
+        if not hasattr(self, "_loading_segment"):
+            self._loading_segment = await self._generate_loading_segment()
 
         return web.Response(
-            body=output.getvalue(),
+            body=self._loading_segment,
+            content_type="video/mp2t",
+            headers={
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    async def _generate_loading_segment(self) -> bytes:
+        """Generate a 4-second black video segment (placeholder while stream loads)."""
+        import tempfile
+
+        width = self.config.get("width", 1920)
+        height = self.config.get("height", 1080)
+        fps = self.config.get("fps", 2)
+
+        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
+            output_path = f.name
+
+        try:
+            # Generate simple black video with silent audio (no text to avoid font issues)
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=0x1a1a2e:s={width}x{height}:d=4:r={fps}",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-level",
+                "4.0",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "32k",
+                "-t",
+                "4",
+                "-f",
+                "mpegts",
+                output_path,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                logger.error(f"Failed to generate loading segment: {stderr.decode()}")
+                return b""
+
+            with open(output_path, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.unlink(output_path)
+            except:
+                pass
+
+    async def handle_snapshot(self, request: web.Request) -> web.Response:
+        """Serve the newest cached JPEG without touching Selenium."""
+        cached = await self.frame_store.get()
+        if cached is None:
+            return web.Response(status=503, text="Snapshot not ready yet")
+
+        jpeg_data, _ = cached
+        return web.Response(
+            body=jpeg_data,
             content_type="image/jpeg",
-            headers={"Cache-Control": "no-cache"},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
         )
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """Health check endpoint."""
         playlist_exists = (HLS_DIR / "stream.m3u8").exists()
+        cached = await self.frame_store.get()
+        now = asyncio.get_running_loop().time()
+        frame_age_ms = None if cached is None else round((now - cached[1]) * 1000)
+        snapshot_ready = cached is not None
+        stream_ready = playlist_exists and self.encoder.running
         return web.json_response(
             {
-                "status": "healthy" if playlist_exists else "starting",
+                "status": "healthy" if stream_ready and snapshot_ready else "starting",
                 "encoder_running": self.encoder.running,
-                "stream_ready": playlist_exists,
+                "capture_ready": self.capture.driver is not None,
+                "stream_ready": stream_ready,
+                "snapshot_ready": snapshot_ready,
+                "last_frame_age_ms": frame_age_ms,
             }
         )
 
@@ -743,44 +1116,119 @@ class StreamServer:
             }
         )
 
+    async def handle_refresh(self, request: web.Request) -> web.Response:
+        """Trigger a page refresh in the browser."""
+        success = await self.capture.refresh()
+        return web.json_response(
+            {
+                "success": success,
+                "message": "Dashboard refreshed"
+                if success
+                else "Browser not available",
+            },
+            status=200 if success else 503,
+        )
 
-async def capture_loop(capture: DashboardCapture, encoder: HLSEncoder, config: dict):
-    """Main loop that captures frames and feeds them to the encoder."""
-    fps = config.get("fps", 10)
+
+def png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
+    """Convert a screenshot to a Roku-friendly JPEG."""
+    img = Image.open(io.BytesIO(png_data))
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGB")
+    output = io.BytesIO()
+    img.save(output, format="JPEG", quality=quality, optimize=True)
+    return output.getvalue()
+
+
+async def encode_loop(encoder: HLSEncoder, frame_queue: asyncio.Queue):
+    """Encode only the newest queued frame, never a stale backlog."""
+    while True:
+        try:
+            png_data = await frame_queue.get()
+            await asyncio.to_thread(encoder.write_frame, png_data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error in encode loop")
+
+
+async def capture_loop(
+    capture: DashboardCapture,
+    frame_queue: asyncio.Queue,
+    frame_store: LatestFrameStore,
+    config: dict,
+):
+    """Capture frames, publish a cached JPEG, and enqueue only the latest PNG."""
+    fps = config.get("fps", 2)
     frame_interval = 1.0 / fps
     frame_count = 0
+    skipped_frames = 0
+    last_log_time = 0.0
+    consecutive_errors = 0
 
     logger.info(f"Starting capture loop at {fps} fps ({frame_interval:.3f}s interval)")
 
-    while encoder.running:
+    while True:
         try:
-            start_time = asyncio.get_event_loop().time()
-
-            # Capture frame
-            png_data = await capture.capture_frame()
+            start_time = asyncio.get_running_loop().time()
+            png_data, is_new = await capture.capture_frame()
+            consecutive_errors = 0
             frame_count += 1
 
-            # Feed to encoder
-            encoder.write_frame(png_data)
-
-            # Log periodically (every second at 10fps)
-            if frame_count % fps == 0:
-                hls_files = list(HLS_DIR.glob("*"))
-                logger.info(
-                    f"Captured {frame_count} frames, HLS files: {[f.name for f in hls_files]}"
+            if is_new:
+                jpeg_data = await asyncio.to_thread(png_to_jpeg, png_data)
+                await frame_store.update(
+                    jpeg_data, asyncio.get_running_loop().time()
                 )
+                if put_latest(frame_queue, png_data):
+                    skipped_frames += 1
+            else:
+                skipped_frames += 1
 
-            # Wait for next frame, accounting for capture time
-            elapsed = asyncio.get_event_loop().time() - start_time
-            sleep_time = max(0, frame_interval - elapsed)
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+            if start_time - last_log_time >= 30:
+                logger.info(
+                    "Frames: %s captured, %s skipped (unchanged or superseded)",
+                    frame_count,
+                    skipped_frames,
+                )
+                last_log_time = start_time
+
+            elapsed = asyncio.get_running_loop().time() - start_time
+            await asyncio.sleep(max(0, frame_interval - elapsed))
 
         except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in capture loop: {e}", exc_info=True)
-            await asyncio.sleep(0.1)
+            raise
+        except Exception:
+            consecutive_errors += 1
+            logger.exception("Error in capture loop")
+            if consecutive_errors >= 3:
+                raise RuntimeError("capture failed three consecutive times")
+            await asyncio.sleep(0.5)
+
+
+async def capture_runner(
+    capture: DashboardCapture,
+    frame_queue: asyncio.Queue,
+    frame_store: LatestFrameStore,
+    config: dict,
+):
+    """Keep the service alive while Chromium/HA is temporarily unavailable."""
+    attempt = 1
+    while True:
+        try:
+            await capture.start()
+            attempt = 1
+            await capture_loop(capture, frame_queue, frame_store, config)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Dashboard capture attempt failed; retrying in %ss",
+                retry_delay_seconds(attempt),
+            )
+            await capture.stop()
+            await asyncio.sleep(retry_delay_seconds(attempt))
+            attempt += 1
 
 
 async def main():
@@ -793,15 +1241,17 @@ async def main():
         config = {}
 
     # Apply defaults for optional settings
+    # Optimized for low CPU usage on Raspberry Pi
     defaults = {
         "dashboard_url": "/lovelace/0",
+        "home_assistant_url": "",
         "kiosk_mode": True,
         "dark_mode": True,
         "width": 1920,
         "height": 1080,
-        "quality": 23,
-        "fps": 5,
-        "segment_duration": 2,  # Short segments for low latency
+        "quality": 28,  # Higher = lower quality but much less CPU (was 23)
+        "fps": 2,  # 2 FPS is enough for dashboards (was 5)
+        "segment_duration": 4,  # Longer segments = less overhead (was 2)
     }
     for key, value in defaults.items():
         if key not in config:
@@ -821,28 +1271,22 @@ async def main():
             "Create a Long-Lived Access Token in your HA profile and add it to the add-on configuration."
         )
 
-    # Create components
+    # Create components. The server starts before capture so health remains
+    # observable while Chromium or Home Assistant is temporarily unavailable.
     capture = DashboardCapture(config)
     encoder = HLSEncoder(config)
-    server = StreamServer(capture, encoder, config)
+    frame_store = LatestFrameStore()
+    frame_queue = asyncio.Queue(maxsize=1)
+    server = StreamServer(capture, encoder, config, frame_store)
 
-    # Start capture
-    await capture.start()
-
-    # Start encoder
     encoder.start()
 
-    # Start capture loop
-    capture_task = asyncio.create_task(capture_loop(capture, encoder, config))
-
-    # Start HTTP server
     runner = web.AppRunner(server.app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8099)
     await site.start()
     logger.info("Stream server running on http://0.0.0.0:8099")
 
-    # Handle shutdown
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
 
@@ -853,15 +1297,41 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown_handler)
 
+    encode_task = asyncio.create_task(encode_loop(encoder, frame_queue))
+    capture_task = asyncio.create_task(
+        capture_runner(capture, frame_queue, frame_store, config)
+    )
+
+    # Wait for first HLS segment and notify s6 we're ready
+    async def notify_ready():
+        playlist_path = Path("/tmp/hls/stream.m3u8")
+        while not playlist_path.exists():
+            await asyncio.sleep(0.5)
+        # Notify s6 via fd 3 (only if running under s6)
+        try:
+            # Check if fd 3 exists before trying to use it
+            import stat
+
+            os.fstat(3)
+            os.write(3, b"\n")
+            logger.info("Notified s6 that service is ready")
+        except OSError:
+            # fd 3 not available (not running under s6)
+            logger.debug("fd 3 not available, skipping s6 notification")
+
+    ready_task = asyncio.create_task(notify_ready())
+
     # Wait for shutdown
     await stop_event.wait()
 
     # Cleanup
-    capture_task.cancel()
-    try:
-        await capture_task
-    except asyncio.CancelledError:
-        pass
+    for task in (capture_task, encode_task, ready_task):
+        task.cancel()
+    for task in (capture_task, encode_task, ready_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     encoder.stop()
     await capture.stop()

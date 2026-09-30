@@ -10,4 +10,8 @@ dist/
 build/
 .eggs/
 *.log
+dashboard-streams-roku.zip
 .DS_Store
+
+# Dev files (may contain secrets)
+dev-config.json

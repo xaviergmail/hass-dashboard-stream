@@ -19,7 +19,11 @@ jobs:
           python-version: "3.11"
 
       - name: Check Python syntax
-        run: python -m py_compile rootfs/usr/src/app/server.py
+        run: |
+          python -m py_compile rootfs/usr/src/app/server.py rootfs/usr/src/app/stream_core.py
+
+      - name: Run unit tests
+        run: PYTHONPATH=rootfs/usr/src/app python -m unittest discover -s tests -v
 
       - name: Validate YAML files
         run: |
@@ -85,6 +89,7 @@ jobs:
           cat > /tmp/test-data/options.json << 'EOF'
           {
             "dashboard_url": "https://demo.home-assistant.io",
+            "home_assistant_url": "http://127.0.0.1:8123",
             "access_token": "",
             "kiosk_mode": false,
             "dark_mode": true
