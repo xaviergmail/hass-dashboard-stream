@@ -2,6 +2,6 @@ title=Dashboard Streams Snapshot
 subtitle=Home Assistant dashboard latest-frame viewer
 major_version=1
 minor_version=0
-build_version=00009
+build_version=00010
 ui_resolutions=fhd
 splash_color=#000000
