@@ -18,6 +18,9 @@ class RokuSnapshotChannelTests(unittest.TestCase):
         self.assertIn("?t=", source)
         self.assertIn('duration="1.0"', scene)
         self.assertIn("pkg:/components/MainScene.brs", scene)
+        self.assertIn("ui_resolutions=fhd", (self.root / "manifest").read_text())
+        self.assertIn('m.poster.setField("uri"', source)
+        self.assertNotIn('m.status.text = "Loading Dashboard Streams..."', source)
 
     def test_addon_exposes_snapshot_endpoint(self):
         server = Path("rootfs/usr/src/app/server.py").read_text()

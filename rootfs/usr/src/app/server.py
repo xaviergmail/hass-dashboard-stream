@@ -1130,11 +1130,33 @@ loading.ts
         )
 
 
-def png_to_jpeg(png_data: bytes, quality: int = 85) -> bytes:
-    """Convert a screenshot to a Roku-friendly JPEG."""
+def _uniform_left_rail_width(img: Image.Image, minimum: int = 64, maximum: int = 320) -> int:
+    """Find a wide, uniform blank rail at the left edge of a dashboard."""
+    rgb = img.convert("RGB")
+    width, height = rgb.size
+    if width <= minimum:
+        return 0
+
+    maximum = min(maximum, width - 1)
+    sample_step = max(1, height // 32)
+    background = tuple(rgb.getpixel((0, height // 2)))
+    for x in range(maximum):
+        column = [tuple(rgb.getpixel((x, y))) for y in range(0, height, sample_step)]
+        if any(sum(abs(pixel[i] - background[i]) for i in range(3)) > 8 for pixel in column):
+            return x if x >= minimum else 0
+    return 0
+
+
+def png_to_jpeg(png_data: bytes, quality: int = 95) -> bytes:
+    """Convert a screenshot to a high-quality Roku-friendly JPEG."""
     img = Image.open(io.BytesIO(png_data))
+    original_size = img.size
     if img.mode in ("RGBA", "LA", "P"):
         img = img.convert("RGB")
+    rail_width = _uniform_left_rail_width(img)
+    if rail_width:
+        img = img.crop((rail_width, 0, img.width, img.height))
+        img = img.resize(original_size, Image.Resampling.LANCZOS)
     output = io.BytesIO()
     img.save(output, format="JPEG", quality=quality, optimize=True)
     return output.getvalue()
