@@ -14,17 +14,21 @@ class RokuSnapshotChannelTests(unittest.TestCase):
     def test_channel_uses_cached_snapshot_with_cache_busting(self):
         source = (self.root / "components" / "MainScene.brs").read_text()
         scene = (self.root / "components" / "MainScene.xml").read_text()
-        self.assertIn("/snapshot.jpg", source)
+        self.assertIn("/snapshot.png", source)
         self.assertIn("?t=", source)
         self.assertIn('duration="1.0"', scene)
         self.assertIn("pkg:/components/MainScene.brs", scene)
         self.assertIn("ui_resolutions=fhd", (self.root / "manifest").read_text())
-        self.assertIn('m.poster.setField("uri"', source)
+        self.assertIn('id="posterA"', scene)
+        self.assertIn('id="posterB"', scene)
+        self.assertIn('m.posterA.setField("uri"', source)
+        self.assertIn('m.posterB.setField("uri"', source)
         self.assertNotIn('m.status.text = "Loading Dashboard Streams..."', source)
 
     def test_addon_exposes_snapshot_endpoint(self):
         server = Path("rootfs/usr/src/app/server.py").read_text()
         self.assertIn('"/snapshot.jpg"', server)
+        self.assertIn('"/snapshot.png"', server)
         self.assertIn('"no-store, no-cache, must-revalidate"', server)
 
 

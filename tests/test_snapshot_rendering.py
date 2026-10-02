@@ -47,6 +47,21 @@ class SnapshotRenderingTests(unittest.TestCase):
 
         self.assertGreater(len(jpeg), 1000)
 
+    def test_snapshot_png_is_lossless_and_keeps_canvas_size(self):
+        image = Image.new("RGB", (192, 108), (16, 16, 16))
+        for x in range(64, 192):
+            for y in range(108):
+                image.putpixel((x, y), (40 + (x % 80), 80, 140))
+        source = io.BytesIO()
+        image.save(source, format="PNG")
+
+        png = self.server.png_to_png(source.getvalue())
+        rendered = Image.open(io.BytesIO(png))
+
+        self.assertEqual(rendered.format, "PNG")
+        self.assertEqual(rendered.size, (192, 108))
+        self.assertNotEqual(rendered.getpixel((0, 54)), (16, 16, 16))
+
 
 if __name__ == "__main__":
     unittest.main()

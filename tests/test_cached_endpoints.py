@@ -26,11 +26,14 @@ class CachedEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.encoder = type("Encoder", (), {"running": True})()
         self.store = self.server.LatestFrameStore()
         await self.store.update(b"cached-jpeg", asyncio.get_running_loop().time())
+        self.png_store = self.server.LatestFrameStore()
+        await self.png_store.update(b"cached-png", asyncio.get_running_loop().time())
         self.stream_server = self.server.StreamServer(
             self.capture,
             self.encoder,
             {"dashboard_url": "/lovelace/0"},
             self.store,
+            self.png_store,
         )
 
     async def test_snapshot_uses_cached_bytes_without_capture(self):
@@ -39,6 +42,13 @@ class CachedEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, b"cached-jpeg")
         self.assertEqual(response.content_type, "image/jpeg")
+        self.assertIn("no-store", response.headers["Cache-Control"])
+
+    async def test_snapshot_png_uses_cached_bytes_without_capture(self):
+        response = await self.stream_server.handle_snapshot_png(None)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"cached-png")
+        self.assertEqual(response.content_type, "image/png")
         self.assertIn("no-store", response.headers["Cache-Control"])
 
     async def test_health_reports_snapshot_and_frame_age(self):

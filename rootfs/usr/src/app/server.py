@@ -663,11 +663,13 @@ class StreamServer:
         encoder: HLSEncoder,
         config: dict,
         frame_store: LatestFrameStore,
+        png_frame_store: Optional[LatestFrameStore] = None,
     ):
         self.capture = capture
         self.encoder = encoder
         self.config = config
         self.frame_store = frame_store
+        self.png_frame_store = png_frame_store
         self.app = web.Application(middlewares=[self._cors_middleware])
         self._setup_routes()
 
@@ -703,6 +705,7 @@ class StreamServer:
         self.app.router.add_get("/stream.m3u8", self.handle_playlist)
         self.app.router.add_get("/segment_{name}.ts", self.handle_segment)
         self.app.router.add_get("/snapshot.jpg", self.handle_snapshot)
+        self.app.router.add_get("/snapshot.png", self.handle_snapshot_png)
         self.app.router.add_get("/health", self.handle_health)
         self.app.router.add_get("/api/kiosk-status", self.handle_kiosk_status)
         self.app.router.add_post("/api/refresh", self.handle_refresh)
@@ -1085,6 +1088,25 @@ loading.ts
             },
         )
 
+    async def handle_snapshot_png(self, request: web.Request) -> web.Response:
+        """Serve the newest cached lossless PNG without touching Selenium."""
+        if self.png_frame_store is None:
+            return web.Response(status=503, text="PNG snapshot not ready")
+        cached = await self.png_frame_store.get()
+        if cached is None:
+            return web.Response(status=503, text="PNG snapshot not ready")
+
+        png_data, _ = cached
+        return web.Response(
+            body=png_data,
+            content_type="image/png",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
     async def handle_health(self, request: web.Request) -> web.Response:
         """Health check endpoint."""
         playlist_exists = (HLS_DIR / "stream.m3u8").exists()
@@ -1147,8 +1169,8 @@ def _uniform_left_rail_width(img: Image.Image, minimum: int = 64, maximum: int =
     return 0
 
 
-def png_to_jpeg(png_data: bytes, quality: int = 95) -> bytes:
-    """Convert a screenshot to a high-quality Roku-friendly JPEG."""
+def normalize_snapshot_image(png_data: bytes) -> Image.Image:
+    """Normalize a dashboard screenshot for TV display."""
     img = Image.open(io.BytesIO(png_data))
     original_size = img.size
     if img.mode in ("RGBA", "LA", "P"):
@@ -1157,9 +1179,32 @@ def png_to_jpeg(png_data: bytes, quality: int = 95) -> bytes:
     if rail_width:
         img = img.crop((rail_width, 0, img.width, img.height))
         img = img.resize(original_size, Image.Resampling.LANCZOS)
+    return img
+
+
+def _encode_snapshot(image: Image.Image, image_format: str, quality: int = 95) -> bytes:
     output = io.BytesIO()
-    img.save(output, format="JPEG", quality=quality, optimize=True)
+    save_options: dict[str, object] = {"optimize": True}
+    if image_format == "JPEG":
+        save_options["quality"] = quality
+    image.save(output, format=image_format, **save_options)
     return output.getvalue()
+
+
+def prepare_snapshot_formats(png_data: bytes, quality: int = 95) -> tuple[bytes, bytes]:
+    """Return normalized JPEG and lossless PNG representations."""
+    image = normalize_snapshot_image(png_data)
+    return _encode_snapshot(image, "JPEG", quality), _encode_snapshot(image, "PNG")
+
+
+def png_to_jpeg(png_data: bytes, quality: int = 95) -> bytes:
+    """Convert a screenshot to a high-quality Roku-friendly JPEG."""
+    return prepare_snapshot_formats(png_data, quality)[0]
+
+
+def png_to_png(png_data: bytes) -> bytes:
+    """Normalize a screenshot and preserve it as a lossless PNG."""
+    return prepare_snapshot_formats(png_data)[1]
 
 
 async def encode_loop(encoder: HLSEncoder, frame_queue: asyncio.Queue):
@@ -1179,6 +1224,7 @@ async def capture_loop(
     frame_queue: asyncio.Queue,
     frame_store: LatestFrameStore,
     config: dict,
+    png_frame_store: Optional[LatestFrameStore] = None,
 ):
     """Capture frames, preserve timing, and publish the newest dashboard state."""
     fps = config.get("fps", 2)
@@ -1199,10 +1245,13 @@ async def capture_loop(
             frame_count += 1
 
             if is_new:
-                jpeg_data = await asyncio.to_thread(png_to_jpeg, png_data)
-                await frame_store.update(
-                    jpeg_data, asyncio.get_running_loop().time()
+                jpeg_data, png_snapshot = await asyncio.to_thread(
+                    prepare_snapshot_formats, png_data
                 )
+                captured_at = asyncio.get_running_loop().time()
+                await frame_store.update(jpeg_data, captured_at)
+                if png_frame_store is not None:
+                    await png_frame_store.update(png_snapshot, captured_at)
             else:
                 unchanged_frames += 1
 
@@ -1239,6 +1288,7 @@ async def capture_runner(
     frame_queue: asyncio.Queue,
     frame_store: LatestFrameStore,
     config: dict,
+    png_frame_store: Optional[LatestFrameStore] = None,
 ):
     """Keep the service alive while Chromium/HA is temporarily unavailable."""
     attempt = 1
@@ -1246,7 +1296,9 @@ async def capture_runner(
         try:
             await capture.start()
             attempt = 1
-            await capture_loop(capture, frame_queue, frame_store, config)
+            await capture_loop(
+                capture, frame_queue, frame_store, config, png_frame_store
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1304,8 +1356,9 @@ async def main():
     capture = DashboardCapture(config)
     encoder = HLSEncoder(config)
     frame_store = LatestFrameStore()
+    png_frame_store = LatestFrameStore()
     frame_queue = asyncio.Queue(maxsize=1)
-    server = StreamServer(capture, encoder, config, frame_store)
+    server = StreamServer(capture, encoder, config, frame_store, png_frame_store)
 
     encoder.start()
 
@@ -1327,7 +1380,7 @@ async def main():
 
     encode_task = asyncio.create_task(encode_loop(encoder, frame_queue))
     capture_task = asyncio.create_task(
-        capture_runner(capture, frame_queue, frame_store, config)
+        capture_runner(capture, frame_queue, frame_store, config, png_frame_store)
     )
 
     # Wait for first HLS segment and notify s6 we're ready

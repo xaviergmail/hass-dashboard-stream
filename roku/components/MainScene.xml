@@ -3,10 +3,18 @@
     <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
     <children>
         <Poster
-            id="poster"
+            id="posterA"
             width="1920"
             height="1080"
             loadDisplayMode="scaleToFit"
+            visible="true"
+        />
+        <Poster
+            id="posterB"
+            width="1920"
+            height="1080"
+            loadDisplayMode="scaleToFit"
+            visible="false"
         />
         <Label
             id="status"
