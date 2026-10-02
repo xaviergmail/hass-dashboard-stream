@@ -7,7 +7,7 @@ class RokuSnapshotChannelTests(unittest.TestCase):
 
     def test_channel_has_manifest_and_scene(self):
         self.assertTrue((self.root / "manifest").is_file())
-        self.assertTrue((self.root / "source" / "Main.brs").is_file())
+        self.assertTrue((self.root / "source" / "main.brs").is_file())
         self.assertTrue((self.root / "components" / "MainScene.xml").is_file())
         self.assertTrue((self.root / "components" / "MainScene.brs").is_file())
 
