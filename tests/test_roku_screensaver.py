@@ -25,6 +25,8 @@ class RokuScreensaverTests(unittest.TestCase):
         source = (self.root / "components" / "ScreensaverScene.brs").read_text()
         scene = (self.root / "components" / "ScreensaverScene.xml").read_text()
         self.assertIn("/snapshot.png", source)
+        self.assertIn("http://10.0.0.69:8099/snapshot.png", source)
+        self.assertNotIn("dashboard-streams.local", source)
         self.assertIn('m.posterA.setField("uri"', source)
         self.assertIn('m.posterB.setField("uri"', source)
         self.assertIn('id="posterA"', scene)

@@ -1,5 +1,5 @@
 sub init()
-    m.snapshotUrl = "http://dashboard-streams.local:8099/snapshot.png"
+    m.snapshotUrl = "http://10.0.0.69:8099/snapshot.png"
     m.posterA = m.top.FindNode("posterA")
     m.posterB = m.top.FindNode("posterB")
     m.status = m.top.FindNode("status")

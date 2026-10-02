@@ -2,7 +2,7 @@ Function RunScreenSaver(params As Object) As Object
     screen = CreateObject("roSGScreen")
     port = CreateObject("roMessagePort")
     screen.SetMessagePort(port)
-    screen.CreateScene("ScreensaverScene")
+    scene = screen.CreateScene("ScreensaverScene")
     screen.Show()
 
     while true
