@@ -98,10 +98,10 @@ For generic Roku HLS players, use:
 
 For the lowest-latency Roku display, use the bundled snapshot channel in `roku/`:
 
-1. Edit `roku/source/MainScene.brs` and set `m.snapshotUrl` to the address of your Dashboard Streams add-on.
+1. Edit `roku/components/MainScene.brs` and set `m.snapshotUrl` to the address of your Dashboard Streams add-on.
 2. Package it from the repository root:
    ```sh
-   (cd roku && zip -r ../dashboard-streams-roku.zip manifest source)
+   (cd roku && zip -r ../dashboard-streams-roku.zip manifest source components images)
    ```
 3. Enable Roku Developer Mode, upload `dashboard-streams-roku.zip`, and launch the channel.
 
