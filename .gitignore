@@ -11,6 +11,7 @@ build/
 .eggs/
 *.log
 dashboard-streams-roku*.zip
+dashboard-streams-screensaver*.zip
 .DS_Store
 
 # Dev files (may contain secrets)
