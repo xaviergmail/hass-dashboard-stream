@@ -1,0 +1,8 @@
+title=Dashboard Streams Screensaver
+subtitle=Home Assistant dashboard idle display
+screensaver_title=Dashboard Streams
+major_version=1
+minor_version=0
+build_version=00001
+ui_resolutions=fhd
+splash_color=#000000

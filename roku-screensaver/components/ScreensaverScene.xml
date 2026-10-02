@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component name="ScreensaverScene" extends="Scene">
+    <script type="text/brightscript" uri="pkg:/components/ScreensaverScene.brs" />
+    <children>
+        <Poster
+            id="posterA"
+            width="1920"
+            height="1080"
+            loadDisplayMode="scaleToFit"
+            visible="true"
+        />
+        <Poster
+            id="posterB"
+            width="1920"
+            height="1080"
+            loadDisplayMode="scaleToFit"
+            visible="false"
+        />
+        <Label
+            id="status"
+            translation="[60, 40]"
+            width="1800"
+            height="60"
+            color="0xffffffff"
+            font="font:MediumSystemFont"
+            text="Loading Dashboard Streams..."
+        />
+        <Timer id="refreshTimer" duration="1.0" repeat="true" />
+    </children>
+</component>
