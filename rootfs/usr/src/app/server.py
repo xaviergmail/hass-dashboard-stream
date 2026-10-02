@@ -1158,11 +1158,12 @@ async def capture_loop(
     frame_store: LatestFrameStore,
     config: dict,
 ):
-    """Capture frames, publish a cached JPEG, and enqueue only the latest PNG."""
+    """Capture frames, preserve timing, and publish the newest dashboard state."""
     fps = config.get("fps", 2)
     frame_interval = 1.0 / fps
     frame_count = 0
-    skipped_frames = 0
+    superseded_frames = 0
+    unchanged_frames = 0
     last_log_time = 0.0
     consecutive_errors = 0
 
@@ -1180,16 +1181,21 @@ async def capture_loop(
                 await frame_store.update(
                     jpeg_data, asyncio.get_running_loop().time()
                 )
-                if put_latest(frame_queue, png_data):
-                    skipped_frames += 1
             else:
-                skipped_frames += 1
+                unchanged_frames += 1
+
+            # FFmpeg assigns timestamps based on the configured input FPS.  It
+            # must receive every capture tick, including identical screenshots,
+            # or a dashboard that changes less often than FPS will play too fast.
+            if put_latest(frame_queue, png_data):
+                superseded_frames += 1
 
             if start_time - last_log_time >= 30:
                 logger.info(
-                    "Frames: %s captured, %s skipped (unchanged or superseded)",
+                    "Frames: %s captured, %s unchanged, %s superseded",
                     frame_count,
-                    skipped_frames,
+                    unchanged_frames,
+                    superseded_frames,
                 )
                 last_log_time = start_time
 
