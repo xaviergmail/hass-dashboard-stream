@@ -10,13 +10,13 @@ import shutil
 import subprocess
 import signal
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from aiohttp import web
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from PIL import Image
+from PIL import Image, ImageOps
 
 from stream_core import (
     LatestFrameStore,
@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 CONFIG_PATH = Path("/data/options.json")
 HLS_DIR = Path("/tmp/hls")
 HLS_DIR_RESOLVED = HLS_DIR.resolve()
+DEFAULT_WIDTH = 3840
+DEFAULT_HEIGHT = 2160
 
 
 class DashboardCapture:
@@ -62,7 +64,7 @@ class DashboardCapture:
         options.add_argument("--disable-default-apps")
         options.add_argument("--no-first-run")
         options.add_argument(
-            f"--window-size={self.config.get('width', 1920)},{self.config.get('height', 1080)}"
+            f"--window-size={self.config.get('width', DEFAULT_WIDTH)},{self.config.get('height', DEFAULT_HEIGHT)}"
         )
         options.add_argument("--hide-scrollbars")
         options.add_argument("--ignore-certificate-errors")
@@ -100,8 +102,8 @@ class DashboardCapture:
         self.driver = await loop.run_in_executor(None, self._create_driver)
 
         # Set exact viewport size using CDP (set_window_size sets outer size, not viewport)
-        width = self.config.get("width", 1920)
-        height = self.config.get("height", 1080)
+        width = self.config.get("width", DEFAULT_WIDTH)
+        height = self.config.get("height", DEFAULT_HEIGHT)
         await loop.run_in_executor(
             None,
             lambda: self.driver.execute_cdp_cmd(
@@ -347,38 +349,93 @@ class DashboardCapture:
                         // Avoid duplicate injection
                         if (window.__dashboardAutoRefreshActive) return;
                         window.__dashboardAutoRefreshActive = true;
-                        
-                        console.log('[Dashboard Streams] Setting up auto-refresh on dashboard updates...');
-                        
-                        // Get the hass object from the DOM
-                        function getHassConnection() {
+
+                        const healthCheckIntervalMs = 10000;
+                        let trackedConnection = null;
+                        let initialHaVersion = null;
+                        let healthFailures = 0;
+                        let reloadScheduled = false;
+
+                        console.log('[Dashboard Streams] Setting up dashboard and Home Assistant update detection...');
+
+                        function getHass() {
                             const haRoot = document.querySelector('home-assistant');
-                            return haRoot?.__hass?.connection || haRoot?.hass?.connection;
+                            return haRoot?.__hass || haRoot?.hass;
                         }
-                        
-                        function subscribeToUpdates() {
-                            const connection = getHassConnection();
-                            if (!connection) {
-                                // Retry in 1 second if not ready yet
-                                console.log('[Dashboard Streams] Waiting for hass connection...');
-                                setTimeout(subscribeToUpdates, 1000);
-                                return;
-                            }
-                            
-                            console.log('[Dashboard Streams] Found hass connection, subscribing to lovelace_updated...');
-                            
+
+                        function getHassConnection() {
+                            return getHass()?.connection;
+                        }
+
+                        function reloadDashboard(reason) {
+                            if (reloadScheduled) return;
+                            reloadScheduled = true;
+                            console.warn('[Dashboard Streams] Reloading dashboard:', reason);
+                            setTimeout(() => location.reload(), 250);
+                        }
+
+                        function subscribeToUpdates(connection) {
+                            console.log('[Dashboard Streams] Subscribing to lovelace_updated...');
                             connection.subscribeEvents((event) => {
                                 console.log('[Dashboard Streams] Dashboard updated, refreshing...', event);
-                                location.reload();
+                                reloadDashboard('Lovelace dashboard changed');
                             }, 'lovelace_updated').then(() => {
                                 console.log('[Dashboard Streams] Subscribed to lovelace_updated events');
                             }).catch((err) => {
                                 console.error('[Dashboard Streams] Failed to subscribe:', err);
+                                if (trackedConnection === connection) trackedConnection = null;
                             });
                         }
-                        
-                        // Start subscription attempt
-                        subscribeToUpdates();
+
+                        async function checkHomeAssistantHealth() {
+                            const hass = getHass();
+                            const connection = hass?.connection;
+                            if (!connection) {
+                                healthFailures += 1;
+                                if (healthFailures >= 3) {
+                                    reloadDashboard('Home Assistant connection unavailable');
+                                }
+                                return;
+                            }
+
+                            // home-assistant-js-websocket exposes the native socket here.
+                            // A closed socket means the page can be stuck on pre-update state.
+                            if (connection.socket?.readyState === WebSocket.CLOSED) {
+                                reloadDashboard('Home Assistant WebSocket closed');
+                                return;
+                            }
+
+                            if (trackedConnection !== connection) {
+                                trackedConnection = connection;
+                                subscribeToUpdates(connection);
+                            }
+
+                            try {
+                                let config = hass.config;
+                                if (typeof connection.sendMessagePromise === 'function') {
+                                    config = await connection.sendMessagePromise({type: 'get_config'});
+                                }
+                                const currentVersion = config?.version;
+                                if (!initialHaVersion && currentVersion) {
+                                    initialHaVersion = currentVersion;
+                                } else if (initialHaVersion && currentVersion && currentVersion !== initialHaVersion) {
+                                    reloadDashboard('Home Assistant version changed');
+                                    return;
+                                }
+                                healthFailures = 0;
+                            } catch (err) {
+                                healthFailures += 1;
+                                console.warn('[Dashboard Streams] Home Assistant health check failed:', err);
+                                if (healthFailures >= 3) {
+                                    reloadDashboard('Home Assistant did not recover after update');
+                                }
+                            }
+                        }
+
+                        // Start immediately and continue checking for HA restarts,
+                        // reconnects, and Core version changes.
+                        checkHomeAssistantHealth();
+                        setInterval(checkHomeAssistantHealth, healthCheckIntervalMs);
                     })();
                 """)
                 logger.info("Auto-refresh script injected")
@@ -560,7 +617,7 @@ class HLSEncoder:
             "-profile:v",
             "main",
             "-level",
-            "4.0",
+            "5.1",
             "-preset",
             "ultrafast",
             "-tune",
@@ -1011,8 +1068,8 @@ loading.ts
         """Generate a 4-second black video segment (placeholder while stream loads)."""
         import tempfile
 
-        width = self.config.get("width", 1920)
-        height = self.config.get("height", 1080)
+        width = self.config.get("width", DEFAULT_WIDTH)
+        height = self.config.get("height", DEFAULT_HEIGHT)
         fps = self.config.get("fps", 2)
 
         with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
@@ -1177,8 +1234,18 @@ def normalize_snapshot_image(png_data: bytes) -> Image.Image:
         img = img.convert("RGB")
     rail_width = _uniform_left_rail_width(img)
     if rail_width:
-        img = img.crop((rail_width, 0, img.width, img.height))
-        img = img.resize(original_size, Image.Resampling.LANCZOS)
+        background = cast(tuple[int, int, int], img.getpixel((0, img.height // 2)))
+        cropped = img.crop((rail_width, 0, img.width, img.height))
+        # Keep the dashboard's geometry intact. Resizing the cropped image
+        # back to the original canvas stretches every card and gauge. Pad the
+        # canvas instead; a later capture-size correction can remove the pad.
+        img = ImageOps.pad(
+            cropped,
+            original_size,
+            method=Image.Resampling.LANCZOS,
+            color=background,
+            centering=(0.0, 0.5),
+        )
     return img
 
 
@@ -1327,8 +1394,8 @@ async def main():
         "home_assistant_url": "",
         "kiosk_mode": True,
         "dark_mode": True,
-        "width": 1920,
-        "height": 1080,
+        "width": DEFAULT_WIDTH,
+        "height": DEFAULT_HEIGHT,
         "quality": 28,  # Higher = lower quality but much less CPU (was 23)
         "fps": 2,  # 2 FPS is enough for dashboards (was 5)
         "segment_duration": 4,  # Longer segments = less overhead (was 2)

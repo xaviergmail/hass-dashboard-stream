@@ -62,6 +62,25 @@ class SnapshotRenderingTests(unittest.TestCase):
         self.assertEqual(rendered.size, (192, 108))
         self.assertNotEqual(rendered.getpixel((0, 54)), (16, 16, 16))
 
+    def test_snapshot_rail_removal_preserves_content_geometry(self):
+        image = Image.new("RGB", (192, 108), (16, 16, 16))
+        for x in range(64, 192):
+            for y in range(108):
+                image.putpixel((x, y), (40, 80, 140))
+        for x in range(80, 88):
+            for y in range(108):
+                image.putpixel((x, y), (220, 40, 40))
+        source = io.BytesIO()
+        image.save(source, format="PNG")
+
+        rendered = self.server.normalize_snapshot_image(source.getvalue())
+
+        self.assertEqual(rendered.size, (192, 108))
+        self.assertEqual(rendered.getpixel((0, 54)), (40, 80, 140))
+        self.assertEqual(rendered.getpixel((16, 54)), (220, 40, 40))
+        self.assertEqual(rendered.getpixel((24, 54)), (40, 80, 140))
+        self.assertEqual(rendered.getpixel((191, 54)), (16, 16, 16))
+
 
 if __name__ == "__main__":
     unittest.main()

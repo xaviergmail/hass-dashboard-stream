@@ -16,8 +16,10 @@ class RokuScreensaverTests(unittest.TestCase):
         manifest = (self.root / "manifest").read_text()
         source = (self.root / "source" / "main.brs").read_text()
         self.assertIn("screensaver_title=", manifest)
+        self.assertIn("screensaver_private=0", manifest)
         self.assertIn("ui_resolutions=fhd", manifest)
-        self.assertIn("Function RunScreenSaver(", source)
+        self.assertIn("Sub RunScreenSaver()", source)
+        self.assertNotIn("Function RunScreenSaver(", source)
         self.assertNotIn("RunUserInterface", source)
         self.assertNotIn("Function Main(", source)
 

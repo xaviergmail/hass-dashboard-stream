@@ -1,6 +1,6 @@
 name: "Dashboard Streams"
 description: "Stream Lovelace dashboards to Roku, Apple TV, Chromecast and other devices via HLS"
-version: "0.3.3"
+version: "0.3.4"
 slug: "dashboard-streams"
 arch:
   - amd64
@@ -26,6 +26,8 @@ options:
   access_token: ""
   kiosk_mode: true
   dark_mode: true
+  width: 3840
+  height: 2160
 schema:
   dashboard_url: str
   home_assistant_url: str

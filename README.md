@@ -11,7 +11,7 @@ Stream your Home Assistant Lovelace dashboards to Roku, Apple TV, Chromecast, Fi
 - **Low Latency**: Cached snapshots avoid stale-frame backlogs; HLS remains available for generic players
 - **Dark Mode**: Forces dark theme for better TV viewing (configurable)
 - **Kiosk Mode**: Hides sidebar and header for a clean display
-- **Auto-Refresh**: Automatically updates when dashboard configuration changes
+- **Auto-Refresh**: Automatically updates when dashboard configuration changes and recovers after Home Assistant Core updates or WebSocket disconnects
 - **Universal Compatibility**: Works with Roku, Apple TV, Chromecast, Fire TV, VLC, and more
 
 ## Prerequisites
@@ -57,8 +57,8 @@ GitHub: https://github.com/NemesisRE/kiosk-mode
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `width` | `1920` | Stream width in pixels |
-| `height` | `1080` | Stream height in pixels |
+| `width` | `3840` | Stream width in pixels (UHD) |
+| `height` | `2160` | Stream height in pixels (UHD) |
 | `quality` | `28` | H.264 CRF quality (18=best, 28=smallest) |
 | `fps` | `2` | Frames per second |
 | `segment_duration` | `4` | HLS segment duration in seconds |
@@ -178,7 +178,7 @@ The health response includes `capture_ready`, `stream_ready`, `snapshot_ready`, 
 
 ### Poor image quality
 - Lower the `quality` value (e.g., 18-20)
-- Ensure `width` and `height` match your TV resolution
+- Ensure `width` and `height` match your TV resolution. The default is UHD `3840x2160`.
 
 ### Sidebar and header still showing
 - Ensure **kiosk-mode** is installed from HACS

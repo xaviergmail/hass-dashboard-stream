@@ -1,4 +1,4 @@
-Function RunScreenSaver(params As Object) As Object
+Sub RunScreenSaver()
     screen = CreateObject("roSGScreen")
     port = CreateObject("roMessagePort")
     screen.SetMessagePort(port)
@@ -13,4 +13,4 @@ Function RunScreenSaver(params As Object) As Object
     end while
 
     screen.Close()
-End Function
+End Sub

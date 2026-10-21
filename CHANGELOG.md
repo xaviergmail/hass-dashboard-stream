@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4]
+
+### Changed
+- Capture Chromium dashboards at UHD `3840x2160` by default.
+- Encode the HLS fallback with an H.264 level suitable for UHD frames.
+- Preserve dashboard geometry when removing a uniform kiosk rail instead of stretching the cropped frame.
+- Monitor the authenticated Home Assistant WebSocket and Core version so the browser automatically reloads after an HA update or unrecovered connection loss.
+
 ## [0.2.2] - 2026-01-04
 
 ### Fixed

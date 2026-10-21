@@ -19,11 +19,11 @@ configuration:
   width:
     name: Width
     description: >-
-      Optional. Stream width in pixels. Default: 1920
+      Optional. Stream width in pixels. Default: 3840 (UHD)
   height:
     name: Height
     description: >-
-      Optional. Stream height in pixels. Default: 1080
+      Optional. Stream height in pixels. Default: 2160 (UHD)
   quality:
     name: Quality (CRF)
     description: >-
