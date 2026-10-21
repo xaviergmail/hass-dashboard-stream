@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import signal
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional
 
 from aiohttp import web
 from selenium import webdriver
@@ -1267,16 +1267,14 @@ def normalize_snapshot_image(png_data: bytes) -> Image.Image:
         img = img.convert("RGB")
     rail_width = _uniform_left_rail_width(img)
     if rail_width:
-        background = cast(tuple[int, int, int], img.getpixel((0, img.height // 2)))
         cropped = img.crop((rail_width, 0, img.width, img.height))
-        # Keep the dashboard's geometry intact. Resizing the cropped image
-        # back to the original canvas stretches every card and gauge. Pad the
-        # canvas instead; a later capture-size correction can remove the pad.
-        img = ImageOps.pad(
+        # Fill the canvas without distorting the dashboard. ImageOps.pad kept
+        # the cropped rail's narrower aspect ratio and left a visible margin.
+        # ImageOps.fit crops only the excess dimension, then scales uniformly.
+        img = ImageOps.fit(
             cropped,
             original_size,
             method=Image.Resampling.LANCZOS,
-            color=background,
             centering=(0.0, 0.5),
         )
     return img
