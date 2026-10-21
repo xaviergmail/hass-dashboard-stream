@@ -36,6 +36,35 @@ HLS_DIR = Path("/tmp/hls")
 HLS_DIR_RESOLVED = HLS_DIR.resolve()
 DEFAULT_WIDTH = 3840
 DEFAULT_HEIGHT = 2160
+DEFAULT_VIEWPORT_WIDTH = 1920
+DEFAULT_VIEWPORT_HEIGHT = 1080
+
+
+def capture_viewport_metrics(config: dict) -> dict[str, int | float]:
+    """Return physical output and CSS layout metrics for Chromium capture."""
+    output_width = int(config.get("width", DEFAULT_WIDTH))
+    output_height = int(config.get("height", DEFAULT_HEIGHT))
+    viewport_width = int(
+        config.get("viewport_width", min(output_width, DEFAULT_VIEWPORT_WIDTH))
+    )
+    viewport_height = int(
+        config.get("viewport_height", min(output_height, DEFAULT_VIEWPORT_HEIGHT))
+    )
+    if viewport_width <= 0 or viewport_height <= 0:
+        raise ValueError("viewport dimensions must be positive")
+
+    # Keep the CSS layout at FHD for a UHD physical screenshot. This prevents
+    # fixed-width Lovelace layouts from appearing tiny with large blank margins.
+    scale_x = output_width / viewport_width
+    scale_y = output_height / viewport_height
+    if abs(scale_x - scale_y) > 0.01:
+        raise ValueError("output and viewport aspect ratios must match")
+
+    return {
+        "width": viewport_width,
+        "height": viewport_height,
+        "deviceScaleFactor": round(scale_x, 3),
+    }
 
 
 class DashboardCapture:
@@ -101,22 +130,26 @@ class DashboardCapture:
         loop = asyncio.get_event_loop()
         self.driver = await loop.run_in_executor(None, self._create_driver)
 
-        # Set exact viewport size using CDP (set_window_size sets outer size, not viewport)
-        width = self.config.get("width", DEFAULT_WIDTH)
-        height = self.config.get("height", DEFAULT_HEIGHT)
+        # Set the CSS layout viewport separately from physical screenshot size.
+        # set_window_size sets outer size, not the emulated layout viewport.
+        output_width = self.config.get("width", DEFAULT_WIDTH)
+        output_height = self.config.get("height", DEFAULT_HEIGHT)
+        viewport = capture_viewport_metrics(self.config)
         await loop.run_in_executor(
             None,
             lambda: self.driver.execute_cdp_cmd(
                 "Emulation.setDeviceMetricsOverride",
-                {
-                    "width": width,
-                    "height": height,
-                    "deviceScaleFactor": 1,
-                    "mobile": False,
-                },
+                {**viewport, "mobile": False},
             ),
         )
-        logger.info(f"Set viewport size to {width}x{height} via CDP")
+        logger.info(
+            "Set physical capture to %sx%s with CSS viewport %sx%s at DPR %s",
+            output_width,
+            output_height,
+            viewport["width"],
+            viewport["height"],
+            viewport["deviceScaleFactor"],
+        )
 
         # Force dark mode via CDP if enabled
         if self.config.get("dark_mode", True):

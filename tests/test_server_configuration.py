@@ -29,6 +29,30 @@ class ServerConfigurationTests(unittest.TestCase):
         self.assertEqual(module.DEFAULT_WIDTH, 3840)
         self.assertEqual(module.DEFAULT_HEIGHT, 2160)
 
+    def test_uhd_capture_keeps_fhd_dashboard_layout(self):
+        spec = importlib.util.spec_from_file_location(
+            "dashboard_streams_server", "rootfs/usr/src/app/server.py"
+        )
+        if spec is None:
+            self.fail("could not load server module spec")
+        module = importlib.util.module_from_spec(spec)
+        if spec.loader is None:
+            self.fail("server module spec has no loader")
+        spec.loader.exec_module(module)
+
+        self.assertEqual(module.DEFAULT_VIEWPORT_WIDTH, 1920)
+        self.assertEqual(module.DEFAULT_VIEWPORT_HEIGHT, 1080)
+        self.assertEqual(
+            module.capture_viewport_metrics({"width": 3840, "height": 2160}),
+            {"width": 1920, "height": 1080, "deviceScaleFactor": 2.0},
+        )
+        self.assertEqual(
+            module.capture_viewport_metrics({"width": 1920, "height": 1080}),
+            {"width": 1920, "height": 1080, "deviceScaleFactor": 1.0},
+        )
+        with self.assertRaises(ValueError):
+            module.capture_viewport_metrics({"width": 3840, "height": 2000})
+
     def test_auto_refresh_detects_home_assistant_updates(self):
         self.assertIn("get_config", self.source)
         self.assertIn("Home Assistant version changed", self.source)

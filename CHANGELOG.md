@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5]
+
+### Fixed
+- Keep the Lovelace CSS layout at 1920x1080 while capturing a 3840x2160 physical frame, preventing the dashboard from appearing zoomed out with large blank margins.
+
 ## [0.3.4]
 
 ### Changed
