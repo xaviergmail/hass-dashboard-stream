@@ -6,6 +6,8 @@
             id="posterA"
             width="1920"
             height="1080"
+            loadWidth="1920"
+            loadHeight="1080"
             loadDisplayMode="scaleToFit"
             visible="true"
         />
@@ -13,6 +15,8 @@
             id="posterB"
             width="1920"
             height="1080"
+            loadWidth="1920"
+            loadHeight="1080"
             loadDisplayMode="scaleToFit"
             visible="false"
         />

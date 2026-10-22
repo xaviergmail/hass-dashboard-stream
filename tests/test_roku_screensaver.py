@@ -33,6 +33,9 @@ class RokuScreensaverTests(unittest.TestCase):
         self.assertIn('m.posterB.setField("uri"', source)
         self.assertIn('id="posterA"', scene)
         self.assertIn('id="posterB"', scene)
+        self.assertIn('loadWidth="1920"', scene)
+        self.assertIn('loadHeight="1080"', scene)
+        self.assertIn('loadDisplayMode="scaleToFit"', scene)
         self.assertIn('duration="1.0"', scene)
 
 
